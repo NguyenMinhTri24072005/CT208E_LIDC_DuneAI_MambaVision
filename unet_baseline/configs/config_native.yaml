@@ -1,0 +1,70 @@
+# U-Net — huấn luyện ở ĐỘ PHÂN GIẢI GỐC (không Resize 256), crop 192 quanh nốt u.
+# Dùng:  python train.py --config configs/config_native.yaml --data.root_dir=/content/segmented_slices
+
+data:
+  root_dir: "../data/segmented_slices"
+  image_size: 256              # chỉ dùng khi native: false
+  native: true                 # true = không Resize; val/test là ảnh gốc (pad bội số 32)
+  # Dùng chung mean/std cho 3 kênh: 3 kênh là 3 lát kề nhau (2.5D), mean/std khác nhau theo kênh
+  # của ImageNet sẽ tạo chênh lệch kênh giả. (x/255 - 0.5)/0.5
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+  crop:
+    enabled: true
+    size: 192                  # bội số của 16
+    p_pos: 0.7                 # 70% crop quanh một pixel dương; 30% crop ngẫu nhiên (hard negative)
+
+model:
+  n_channels: 3
+  n_classes: 1
+  bilinear: False
+  base_channels: 64
+  use_checkpoint: False
+
+train:
+  epochs: 40                   # cosine chạy hết đúng 40 epoch
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.01           # tăng từ 1e-4: lần trước train loss 0.17 vs val 0.25 (bắt đầu overfit)
+  optimizer: "AdamW"
+  scheduler: "CosineAnnealing"
+  min_lr: 0.000005
+  amp: True
+  channels_last: True
+  grad_clip: 1.0
+  early_stopping_patience: 10
+  seed: 42
+  num_workers: 2
+  pin_memory: True
+  limit_train_samples: null
+  limit_val_samples: 800       # val ảnh gốc đầy đủ khá tốn thời gian -> chọn mô hình trên 800 mẫu cố định
+  limit_test_samples: null     # test luôn đủ 2006 mẫu
+
+loss:
+  type: "CombinedLoss"         # cấu hình đã cho kết quả tốt hơn ở lần train trước
+  bce_weight: 0.3
+  dice_weight: 0.7
+  focal_weight: 0.0
+  pos_weight: 1.0
+  smooth: 1.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  tversky_exponent: 0.75
+
+augment:
+  hflip_p: 0.5
+  vflip_p: 0.0
+  rotate90_p: 0.0
+  shift_scale_rotate_p: 0.5
+  brightness_contrast_p: 0.2
+  elastic_transform_p: 0.0     # không dùng trong transforms.py mới
+  gaussian_noise_p: 0.0        # không dùng trong transforms.py mới
+
+checkpoint:
+  dir: "checkpoints"
+  save_best_metric: "val_dice"
+  resume_path: null
+
+logging:
+  tensorboard: True
+  log_dir: "runs"

@@ -1,0 +1,67 @@
+# Cấu hình dự án U-Net Baseline (Ronneberger et al., 2015)
+# Tất cả đường dẫn đều tính tương đối so với thư mục gốc dự án unet_baseline/
+
+data:
+  root_dir: "../data/segmented_slices"
+  image_size: 256
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  crop:
+    enabled: false               # Bật Focal Tumor Cropping (B2.1) nếu muốn train nhanh trên 128x128
+    size: 128
+    p_pos: 0.7                  # 70% crop quanh nốt u, 30% crop ngẫu nhiên
+
+model:
+  n_channels: 3
+  n_classes: 1
+  bilinear: False
+  base_channels: 64
+  use_checkpoint: False
+
+train:
+  epochs: 50
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.0001
+  optimizer: "AdamW"           # AdamW hoặc Adam hoặc SGD
+  scheduler: "CosineAnnealing"  # CosineAnnealing hoặc ReduceLROnPlateau hoặc null
+  min_lr: 0.000005
+  amp: True                    # Tự động dùng mixed precision (torch.cuda.amp)
+  channels_last: True          # Tăng tốc độ tính toán Conv2d trên Tensor Core (T4 GPU)
+  grad_clip: 1.0               # Gradient clipping (null nếu tắt)
+  early_stopping_patience: 15
+  seed: 42
+  num_workers: 2
+  pin_memory: True
+  limit_train_samples: null    # Giới hạn số mẫu để train thử nghiệm (null = toàn bộ 9343 mẫu)
+  limit_val_samples: null      # Giới hạn số mẫu val (null = toàn bộ 1699 mẫu)
+  limit_test_samples: null     # Giới hạn số mẫu test (null = toàn bộ 2006 mẫu)
+
+loss:
+  type: "CombinedLoss"         # CombinedLoss, DiceLoss, BCE, FocalLoss, FocalTverskyLoss
+  bce_weight: 0.3
+  dice_weight: 0.7
+  focal_weight: 0.0
+  pos_weight: 1.0              # Trọng số lớp dương cho BCE (1.0 = cân bằng, >1.0 ưu tiên nốt u)
+  smooth: 1.0
+  tversky_alpha: 0.3           # Phạt False Positive (nếu dùng FocalTverskyLoss)
+  tversky_beta: 0.7            # Phạt False Negative - ưu tiên Recall (nếu dùng FocalTverskyLoss)
+  tversky_exponent: 0.75
+
+augment:
+  hflip_p: 0.5
+  vflip_p: 0.0                 # Tắt lật dọc vì ảnh CT lộn ngược không có ý nghĩa giải phẫu
+  rotate90_p: 0.0              # Tắt xoay 90 độ vì sai lệch hướng giải phẫu
+  shift_scale_rotate_p: 0.5
+  brightness_contrast_p: 0.2
+  elastic_transform_p: 0.0
+  gaussian_noise_p: 0.0
+
+checkpoint:
+  dir: "checkpoints"
+  save_best_metric: "val_dice" # Metric dùng để chọn best model (val_dice hoặc val_loss)
+  resume_path: null
+
+logging:
+  tensorboard: True
+  log_dir: "runs"

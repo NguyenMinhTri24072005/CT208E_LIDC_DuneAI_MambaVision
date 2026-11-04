@@ -1,0 +1,46 @@
+{
+  "checkpoint": "/content/ckpt/best.pth",
+  "num_samples": 948,
+  "threshold": 0.5,
+  "min_area": 0,
+  "dice": {
+    "mean": 0.2621,
+    "std": 0.3449
+  },
+  "iou": {
+    "mean": 0.2087,
+    "std": 0.2942
+  },
+  "hd95": {
+    "mean": 115.6806,
+    "std": 85.6016,
+    "valid_count": 794,
+    "nan_count": 154
+  },
+  "stratified_metrics": {
+    "<=24 (rất nhỏ)": {
+      "num_samples": 0,
+      "dice_mean": 0.0,
+      "dice_std": 0.0,
+      "pred_empty_count": 0
+    },
+    "25-57 (nhỏ)": {
+      "num_samples": 44,
+      "dice_mean": 0.2403,
+      "dice_std": 0.3075,
+      "pred_empty_count": 7
+    },
+    "58-177 (trung bình)": {
+      "num_samples": 459,
+      "dice_mean": 0.3086,
+      "dice_std": 0.3592,
+      "pred_empty_count": 75
+    },
+    ">177 (lớn)": {
+      "num_samples": 445,
+      "dice_mean": 0.2162,
+      "dice_std": 0.3264,
+      "pred_empty_count": 72
+    }
+  }
+}

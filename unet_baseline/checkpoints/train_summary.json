@@ -1,0 +1,12 @@
+{
+  "start_epoch": 1,
+  "end_epoch": 46,
+  "epochs_trained": 46,
+  "total_time_sec": 10285.54,
+  "total_time_formatted": "2h 51m 25s",
+  "avg_epoch_time_sec": 223.6,
+  "avg_epoch_time_formatted": "3m 43s",
+  "best_epoch": 31,
+  "best_metric_name": "val_dice",
+  "best_metric_value": 0.5851
+}
