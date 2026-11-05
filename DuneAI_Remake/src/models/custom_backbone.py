@@ -34,6 +34,18 @@ MAMBAVISION_REGISTRY = {
 }
 
 
+# Kênh cơ sở `dim` của từng biến thể (theo mã nguồn NVlabs/MambaVision); 4 tầng có số kênh dim * 2^i.
+# MambaVision cần nhân CUDA `mamba-ssm` nên KHÔNG chạy được trên CPU -> không thể "dò" bằng forward ở đó.
+MAMBAVISION_BASE_DIM = {
+    "mambavision_t": 80,
+    "mambavision_t2": 80,
+    "mambavision_s": 96,
+    "mambavision_b": 128,
+    "mambavision_l": 196,
+    "mambavision_l2": 196,
+}
+
+
 def is_mambavision_backbone(backbone_name) -> bool:
     """Kiểm tra xem tên backbone có kích hoạt MambaVision hay không (False = dùng U-Net thuần CNN)."""
     if backbone_name is None:
@@ -119,7 +131,9 @@ class MambaVisionEncoder(nn.Module):
         key = self.model_name.strip().lower()
         self.hf_repo = MAMBAVISION_REGISTRY.get(key, self.model_name)
 
-        if self.use_mock or key == "mambavision_mock":
+        self._key = key
+        self._is_mock = bool(self.use_mock or key == "mambavision_mock")
+        if self._is_mock:
             self.backbone = _MockMambaVisionBackbone()
         else:
             self.backbone = self._load_real_mambavision(self.hf_repo, pretrained=self.pretrained)
@@ -137,9 +151,14 @@ class MambaVisionEncoder(nn.Module):
             from transformers import AutoConfig, AutoModel
         except ImportError as e:
             raise ImportError(
-                "Chưa cài đặt thư viện `transformers` để nạp MambaVision. "
-                "Khi muốn bật MambaVision, hãy cài đặt: `pip install transformers timm mambavision`"
+                "Chưa cài đặt thư viện `transformers` để nạp MambaVision. Bản thật còn cần timm, einops và "
+                "`mamba-ssm` (nhân CUDA, cần Linux + GPU NVIDIA): "
+                "`pip install transformers timm einops mamba-ssm`. Muốn thử trên CPU hãy dùng use_mock=True."
             ) from e
+
+        if not torch.cuda.is_available():
+            print("[MambaVisionEncoder] ⚠️ Không có CUDA: MambaVision thật dùng nhân CUDA `selective_scan_fn` "
+                  "nên sẽ KHÔNG chạy được forward trên CPU.")
 
         if pretrained:
             print(f"[MambaVisionEncoder] Đang tải Pre-trained Backbone từ: {hf_repo} ...")
@@ -150,11 +169,20 @@ class MambaVisionEncoder(nn.Module):
             return AutoModel.from_config(cfg, trust_remote_code=True)
 
     def _probe_out_channels(self):
+        if not self._is_mock and self._key in MAMBAVISION_BASE_DIM:
+            d = MAMBAVISION_BASE_DIM[self._key]
+            return [d * 2 ** i for i in range(4)]
+
         was_training = self.backbone.training
         self.backbone.eval()
         with torch.no_grad():
             param = next(self.backbone.parameters(), None)
             device = param.device if param is not None else torch.device("cpu")
+            if not self._is_mock and device.type != "cuda":
+                raise RuntimeError(
+                    f"Không biết số kênh của '{self.model_name}' và không thể dò bằng forward ngoài CUDA. "
+                    f"Hãy dùng một tên trong {sorted(MAMBAVISION_BASE_DIM)} hoặc tạo encoder trên GPU."
+                )
             dummy = torch.zeros(1, 3, 128, 128, device=device)
             out = self.backbone(dummy)
             features = self._extract_feature_list(out)
@@ -177,7 +205,15 @@ class MambaVisionEncoder(nn.Module):
             return list(backbone_output["features"])
         if hasattr(backbone_output, "features"):
             return list(backbone_output.features)
-        raise TypeError(f"Định dạng đầu ra của MambaVision không hợp lệ: {type(backbone_output)}")
+        hs = getattr(backbone_output, "hidden_states", None)
+        if hs is None and isinstance(backbone_output, dict):
+            hs = backbone_output.get("hidden_states")
+        if hs is not None:
+            return list(hs)
+        raise TypeError(
+            f"Định dạng đầu ra của MambaVision không hợp lệ: {type(backbone_output)}. "
+            f"Cần (pooled, [4 feature maps]) hoặc đối tượng có `features`/`hidden_states`."
+        )
 
     # =========================================================================
     # CƠ CHẾ ĐÓNG / MỞ KHÓA TRỌNG SỐ (FREEZE / UNFREEZE BACKBONE)
@@ -185,7 +221,8 @@ class MambaVisionEncoder(nn.Module):
     def freeze(self):
         """
         Đóng băng trọng số lõi MambaVision (`requires_grad = False`) và khóa BatchNorm/LayerNorm
-        ở chế độ `.eval()`. Lưu ý: `input_adapter` (nếu in_channels != 3) vẫn được học bình thường.
+        ở chế độ `.eval()`. `input_adapter` (nếu in_channels != 3) vẫn được học; khi đó forward giữ đồ thị
+        autograd xuyên qua backbone đóng băng nên tốn thêm bộ nhớ kích hoạt.
         """
         self._is_frozen = True
         for param in self.backbone.parameters():
@@ -198,7 +235,7 @@ class MambaVisionEncoder(nn.Module):
         self._is_frozen = False
         for param in self.backbone.parameters():
             param.requires_grad = True
-        self.backbone.train()
+        self.backbone.train(self.training)
         return self
 
     def set_trainable(self, trainable: bool):
@@ -225,7 +262,10 @@ class MambaVisionEncoder(nn.Module):
         if self.normalize_imagenet:
             x = (x - self.img_mean) / self.img_std
 
-        if self._is_frozen:
+        # Nếu `input_adapter` có tham số học được thì gradient PHẢI chảy ngược qua backbone (dù backbone
+        # đóng băng), nên không được bọc no_grad. Chỉ khi phía trước không có gì để học mới tiết kiệm bộ nhớ.
+        adapter_trainable = any(p.requires_grad for p in self.input_adapter.parameters())
+        if self._is_frozen and not adapter_trainable:
             with torch.no_grad():
                 out = self.backbone(x)
         else:
@@ -268,6 +308,32 @@ def _cmd_selftest(_):
     assert enc.is_frozen is False
     assert enc.backbone.training is True
     assert all(p.requires_grad for p in enc.backbone.parameters())
+
+    # --- Các ca hồi quy: lỗi gradient adapter, BN khi freeze, unfreeze khi eval, kích thước lẻ ---
+    head = nn.Conv2d(80, 1, 1)
+    e5 = MambaVisionEncoder(in_channels=5, pretrained=False, freeze_backbone=True, use_mock=True)
+    head(e5(torch.randn(2, 5, 64, 64))[0]).mean().backward()
+    g = e5.input_adapter.weight.grad
+    assert g is not None and g.abs().sum() > 0, "Freeze + in_channels!=3: input_adapter phải nhận gradient"
+    assert all(p.grad is None for p in e5.backbone.parameters()), "Backbone đóng băng không được có gradient"
+
+    ef = MambaVisionEncoder(pretrained=False, freeze_backbone=True, use_mock=True).train()
+    before = [m.running_mean.clone() for m in ef.modules() if isinstance(m, nn.BatchNorm2d)]
+    ef(torch.randn(2, 3, 64, 64))
+    after = [m.running_mean for m in ef.modules() if isinstance(m, nn.BatchNorm2d)]
+    assert all(torch.equal(a, b) for a, b in zip(before, after)), "Freeze phải giữ nguyên thống kê BatchNorm"
+
+    ef.eval().unfreeze()
+    assert ef.backbone.training is False, "unfreeze() khi module đang eval không được ép backbone về train"
+
+    for size in (96, 100, 512):
+        out = MambaVisionEncoder(pretrained=False, use_mock=True)(torch.randn(1, 3, size, size))
+        assert len(out) == 4 and out[0].shape[-1] == size // 4
+
+    class _HFLike:  # mô phỏng ModelOutput của Hugging Face
+        hidden_states = [torch.zeros(1, c, 2, 2) for c in (80, 160, 320, 640)]
+    assert len(MambaVisionEncoder._extract_feature_list(_HFLike())) == 4
+    assert [MAMBAVISION_BASE_DIM["mambavision_t"] * 2 ** i for i in range(4)] == enc.out_channels
 
     print("✅ selftest custom_backbone.py: OK!")
 

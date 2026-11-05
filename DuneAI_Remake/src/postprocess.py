@@ -286,11 +286,12 @@ def compute_3d_metrics(pred_mask, gt_mask, spacing_z=1.0, compute_hd95=True, eps
 def load_trained_model(checkpoint_path, device=None, default_features=64, in_channels=3):
     """
     Nạp mô hình DuneUNet từ file checkpoint (.pth).
-    Tự động suy luận số `features` (32, 64, ...) từ kích thước trọng số `inc.double_conv.0.weight`
-    để người dùng không bao giờ bị lỗi lệch số kênh khi load model.
+    Tự động đọc `meta` (features, backbone, in_channels) hoặc suy luận từ kích thước trọng số
+    để tương thích với cả Baseline U-Net và MambaVision-UNet.
     """
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=device)
+    meta = (ckpt.get("meta") or {}) if isinstance(ckpt, dict) else {}
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
 
     # Bóc tiền tố 'module.' nếu checkpoint từng lưu trực tiếp từ DataParallel
@@ -303,9 +304,21 @@ def load_trained_model(checkpoint_path, device=None, default_features=64, in_cha
         features = int(cleaned_state[first_conv_key].shape[0])
         in_channels = int(cleaned_state[first_conv_key].shape[1])
     else:
-        features = default_features
+        features = int(meta.get("features", default_features))
+        in_channels = int(meta.get("in_channels", in_channels))
 
-    model = DuneUNet(in_channels=in_channels, classes=1, features=features)
+    backbone = str(meta.get("backbone", "none"))
+    if backbone == "none" and any(k.startswith("encoder.backbone.") for k in cleaned_state):
+        backbone = "mambavision_t"
+
+    # Khi nạp từ checkpoint đã train, đặt pretrained=False vì toàn bộ trọng số sẽ được nạp từ cleaned_state
+    model = DuneUNet(
+        in_channels=in_channels,
+        classes=1,
+        features=features,
+        backbone=backbone,
+        pretrained=False,
+    )
     model.load_state_dict(cleaned_state)
     model.to(device)
     model.eval()
