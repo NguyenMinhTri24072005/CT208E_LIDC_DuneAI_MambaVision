@@ -1,0 +1,2740 @@
+================================================================================
+DUNEAI - PROJECT DIRECTORY STRUCTURE
+================================================================================
+
+DuneAI_Remake/
+├── configs/
+│   └── config.py
+├── notebooks/
+├── src/
+│   ├── models/
+│   │   ├── custom_backbone.py
+│   │   └── dune_unet.py
+│   ├── dataset.py
+│   ├── losses.py
+│   ├── medical_prep.py
+│   ├── offline_builder.py
+│   ├── postprocess.py
+│   └── trainer.py
+├── test_viewer.py
+└── train_main.py
+
+================================================================================
+SOURCE CODE FILES (Python, R, Jupyter Notebooks)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+FILE: configs\config.py
+--------------------------------------------------------------------------------
+
+# configs/config.py
+
+# ==========================================
+# THÔNG SỐ KHÔNG GIAN & VẬT LÝ Y TẾ
+# ==========================================
+IMAGE_SIZE = 512
+
+# Cửa sổ Hounsfield cho mô phổi (Lung Window)
+WINDOW_WIDTH = 1500
+WINDOW_LEVEL = -600
+RESAMPLING_STEP = 25
+
+# ==========================================
+# THÔNG SỐ LỌC DỮ LIỆU BỆNH NHÂN
+# ==========================================
+# Ngưỡng diện tích nhỏ nhất để giữ lại lát cắt có khối u
+TUMOR_SIZE_LOW_LIM = 20.0  # mm^2
+
+# Tỷ lệ lấy mẫu các lát cắt âm tính (không có khối u) để cân bằng dữ liệu
+ZERO_SL_RATIO = 0.25
+
+# ==========================================
+# THÔNG SỐ HUẤN LUYỆN
+# ==========================================
+VAL_SPLIT = 0.15
+SEED = 42
+
+BATCH_SIZE = 8
+EPOCHS = 50
+LR = 1e-4
+
+--------------------------------------------------------------------------------
+FILE: src\dataset.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+dataset.py - PyTorch Dataset & DataLoader 2.5D cho DuneAI.
+
+Đặc điểm:
+  - Đọc trực tiếp từ cache_1mm thông qua mmap (chỉ đọc lát cắt cần dùng).
+  - Ghép 3 lát cắt liên tiếp (z-1, z, z+1) tạo đầu vào 2.5D (3, 512, 512).
+  - Áp mặt nạ phổi an toàn: Train hợp thêm vùng u giãn nở; Val/Test chỉ dùng phổi (không rò rỉ nhãn).
+  - Hỗ trợ chuẩn hóa cửa sổ HU ngay trên CPU hoặc trả về int16 để chạy window_hu_torch trên GPU.
+
+Dùng:
+  python dataset.py selftest
+  python dataset.py inspect --cache-dir data/cache_1mm
+"""
+import argparse
+import json
+import random
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+THIS_DIR = Path(__file__).resolve().parent
+ROOT = THIS_DIR.parent
+for p in (str(THIS_DIR), str(ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from configs.config import IMAGE_SIZE
+from medical_prep import (
+    HU_FLOOR,
+    apply_lung_mask,
+    clip_and_window_hu,
+    load_cached_slices,
+    lung_cache_path,
+    lung_keep_mask,
+    window_hu_torch,
+)
+from offline_builder import build_dataset_index
+
+
+class LIDC25DDataset(Dataset):
+    def __init__(
+        self,
+        cache_dir,
+        csv_path=None,
+        split="train",
+        in_channels=3,
+        image_size=IMAGE_SIZE,
+        apply_lung=True,
+        window_on_cpu=True,
+        quantize=True,
+        augment=False,
+    ):
+        """
+        Args:
+            cache_dir: Đường dẫn tới thư mục cache_1mm.
+            csv_path: Đường dẫn tới slices.csv (mặc định: <cache_dir>/slices.csv).
+            split: 'train', 'val', hoặc 'all'.
+            in_channels: Số lát cắt ghép kênh 2.5D (mặc định 3: z-1, z, z+1).
+            image_size: Kích thước đầu ra sau pad/crop (mặc định 512).
+            apply_lung: Có che vùng ngoài phổi về -1000 HU hay không.
+            window_on_cpu: True -> trả về float32 [0, 1]; False -> trả về int16 HU để chạy window_hu_torch trên GPU.
+            quantize: Bật/tắt lượng tử hóa bước 25 HU.
+            augment: Bật lật/xoay ngẫu nhiên (chỉ có tác dụng khi split='train').
+        """
+        super().__init__()
+        assert in_channels in (1, 3, 5), "in_channels phải là số lẻ (1, 3, hoặc 5)"
+        self.cache_dir = Path(cache_dir)
+        self.csv_path = Path(csv_path) if csv_path is not None else (self.cache_dir / "slices.csv")
+        self.split = split
+        self.in_channels = in_channels
+        self.half_k = in_channels // 2
+        self.image_size = image_size
+        self.apply_lung = apply_lung
+        self.window_on_cpu = window_on_cpu
+        self.quantize = quantize
+        self.augment = bool(augment and (split == "train"))
+
+        if not self.csv_path.exists():
+            raise FileNotFoundError(
+                f"Không tìm thấy {self.csv_path}. Hãy chạy `python offline_builder.py build` trước!"
+            )
+
+        df = pd.read_csv(self.csv_path)
+        if split is not None and split != "all":
+            df = df[df["split"] == split].reset_index(drop=True)
+        if len(df) == 0:
+            raise ValueError(f"Không có mẫu nào thuộc split='{split}' trong {self.csv_path}")
+        self.df = df
+
+    def __len__(self):
+        return len(self.df)
+
+    def _neighbor_indices(self, z, num_slices):
+        """Lấy chỉ số các lát lân cận, tự động kẹp biên ở lát 0 và lát cuối."""
+        return [min(max(0, z + offset), num_slices - 1) for offset in range(-self.half_k, self.half_k + 1)]
+
+    @staticmethod
+    def _augment_pair(img_chw, mask_1hw):
+        """Biến đổi hình học đồng bộ trên cả khối kênh 2.5D và mask trung tâm."""
+        if random.random() < 0.5:
+            img_chw = np.flip(img_chw, axis=2)
+            mask_1hw = np.flip(mask_1hw, axis=2)
+        if random.random() < 0.5:
+            img_chw = np.flip(img_chw, axis=1)
+            mask_1hw = np.flip(mask_1hw, axis=1)
+        k = random.randint(0, 3)
+        if k > 0:
+            img_chw = np.rot90(img_chw, k=k, axes=(1, 2))
+            mask_1hw = np.rot90(mask_1hw, k=k, axes=(1, 2))
+        return np.ascontiguousarray(img_chw), np.ascontiguousarray(mask_1hw)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        pid = str(row["patient_id"])
+        z = int(row["z"])
+        num_slices = int(row["num_slices"])
+
+        p_dir = self.cache_dir / pid
+        z_indices = self._neighbor_indices(z, num_slices)
+
+        use_lung = (
+            self.apply_lung
+            and bool(row.get("has_lung_mask", 0))
+            and lung_cache_path(p_dir).exists()
+        )
+        loaded = load_cached_slices(p_dir, z_indices, size=self.image_size, with_lung=use_lung)
+
+        if use_lung:
+            img_stack, msk_stack, lung_stack = loaded
+            # QUAN TRỌNG: Chỉ truyền msk_stack vào lung_keep_mask khi split == 'train'
+            tumor_for_keep = msk_stack if self.split == "train" else None
+            keep = lung_keep_mask(lung_stack, tumor_mask=tumor_for_keep)
+            img_stack = apply_lung_mask(img_stack, keep, fill=HU_FLOOR)
+        else:
+            img_stack, msk_stack = loaded
+
+        # Nhãn mục tiêu chỉ là lát cắt chính giữa (1, H, W)
+        center_mask = (msk_stack[self.half_k : self.half_k + 1] > 0).astype(np.float32)
+
+        if self.window_on_cpu:
+            img_out = clip_and_window_hu(img_stack, quantize=self.quantize)
+        else:
+            img_out = img_stack.astype(np.int16)
+
+        if self.augment:
+            img_out, center_mask = self._augment_pair(img_out, center_mask)
+
+        return {
+            "image": torch.from_numpy(img_out),
+            "mask": torch.from_numpy(center_mask),
+            "patient_id": pid,
+            "z": z,
+        }
+
+
+def create_dataloaders(
+    cache_dir,
+    batch_size=8,
+    num_workers=2,
+    in_channels=3,
+    apply_lung=True,
+    window_on_cpu=True,
+    augment_train=True,
+):
+    """Hàm tiện ích khởi tạo cặp (train_loader, val_loader) sẵn sàng cho vòng lặp huấn luyện."""
+    train_ds = LIDC25DDataset(
+        cache_dir=cache_dir,
+        split="train",
+        in_channels=in_channels,
+        apply_lung=apply_lung,
+        window_on_cpu=window_on_cpu,
+        augment=augment_train,
+    )
+    val_ds = LIDC25DDataset(
+        cache_dir=cache_dir,
+        split="val",
+        in_channels=in_channels,
+        apply_lung=apply_lung,
+        window_on_cpu=window_on_cpu,
+        augment=False,
+    )
+    pin = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin
+    )
+    return train_loader, val_loader
+
+
+def _cmd_selftest(_):
+    print("Đang chạy kiểm thử tự động dataset.py...")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for i in range(1, 5):
+            p_dir = tmp / f"LIDC-IDRI-000{i}"
+            p_dir.mkdir(parents=True)
+            img = np.random.randint(-1000, 300, size=(12, 360, 360), dtype=np.int16)
+            msk = np.zeros((12, 360, 360), dtype=np.uint8)
+            lung = np.ones((12, 360, 360), dtype=np.uint8)
+            msk[5:7, 150:160, 150:160] = 1  # 100 mm²
+
+            np.save(p_dir / "image_1mm.npy", img)
+            np.save(p_dir / "mask_1mm.npy", msk)
+            np.save(p_dir / "lung_1mm.npy", lung)
+            with open(p_dir / "meta.json", "w", encoding="utf-8") as f:
+                json.dump({"orig_spacing_xyz": [0.7, 0.7, 1.5], "lung_ok": True}, f)
+
+        build_dataset_index(tmp)
+        train_loader, val_loader = create_dataloaders(tmp, batch_size=2, num_workers=0)
+        batch = next(iter(train_loader))
+
+        img_b, msk_b = batch["image"], batch["mask"]
+        assert img_b.shape == (2, 3, IMAGE_SIZE, IMAGE_SIZE), f"Sai shape ảnh: {img_b.shape}"
+        assert msk_b.shape == (2, 1, IMAGE_SIZE, IMAGE_SIZE), f"Sai shape mask: {msk_b.shape}"
+        assert img_b.dtype == torch.float32 and 0.0 <= img_b.min() and img_b.max() <= 1.0
+        assert set(torch.unique(msk_b).tolist()) <= {0.0, 1.0}
+
+        # Kiểm tra chế độ đẩy HU int16 lên GPU rồi gọi window_hu_torch
+        ds_cpu = LIDC25DDataset(tmp, split="val", window_on_cpu=True, augment=False)
+        ds_raw = LIDC25DDataset(tmp, split="val", window_on_cpu=False, augment=False)
+        assert torch.allclose(ds_cpu[0]["image"], window_hu_torch(ds_raw[0]["image"]), atol=1e-6)
+        print("✅ selftest dataset.py: OK!")
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _cmd_inspect(a):
+    train_loader, val_loader = create_dataloaders(
+        a.cache_dir, batch_size=a.batch_size, num_workers=0
+    )
+    batch = next(iter(train_loader))
+    img, msk = batch["image"], batch["mask"]
+    print("=" * 50)
+    print("🔍 KIỂM TRA BATCH THỰC TẾ TỪ DATALOADER")
+    print("=" * 50)
+    print(f"Số batch Train : {len(train_loader)} | Số batch Val: {len(val_loader)}")
+    print(f"Image Tensor   : shape={tuple(img.shape)}, dtype={img.dtype}, range=[{img.min():.4f}, {img.max():.4f}]")
+    print(f"Mask Tensor    : shape={tuple(msk.shape)}, dtype={msk.dtype}, unique={torch.unique(msk).tolist()}")
+    print(f"Bệnh nhân mẫu  : {batch['patient_id']} | Lát Z: {batch['z'].tolist()}")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("selftest", help="Kiểm thử tự động với dữ liệu giả lập")
+    s.set_defaults(fn=_cmd_selftest)
+
+    i = sub.add_parser("inspect", help="Kiểm tra nhanh một batch từ thư mục cache_1mm thật")
+    i.add_argument("--cache-dir", default=str(ROOT / "data" / "cache_1mm"))
+    i.add_argument("--batch-size", type=int, default=4)
+    i.set_defaults(fn=_cmd_inspect)
+
+    args = ap.parse_args()
+    args.fn(args)
+
+--------------------------------------------------------------------------------
+FILE: src\losses.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+losses.py - Hàm mất mát (Loss Functions) và chỉ số đánh giá (Metrics) cho phân vùng khối u phổi.
+
+Bao gồm:
+  - DiceBCELoss: Kết hợp BCEWithLogitsLoss và Batch-level Soft Dice Loss.
+  - TverskyFocalLoss: Tùy chọn chuyên trị khối u siêu nhỏ (phạt nặng False Negative).
+  - compute_segmentation_metrics: Tính Intersection, Union, Dice, IoU từ raw logits.
+
+Dùng:
+  python DuneAI_Remake/src/losses.py selftest
+"""
+import argparse
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class DiceBCELoss(nn.Module):
+    """
+    Hàm mất mát tiêu chuẩn cho phân vùng y khoa:
+        Loss = bce_weight * BCEWithLogits + dice_weight * (1 - SoftDice)
+    Mặc định bật batch_dice=True để ổn định đạo hàm khi trong batch có lát cắt âm tính (không có u).
+    """
+    def __init__(
+        self,
+        bce_weight=0.5,
+        dice_weight=0.5,
+        pos_weight=None,
+        smooth=1.0,
+        batch_dice=True,
+    ):
+        super().__init__()
+        self.bce_weight = float(bce_weight)
+        self.dice_weight = float(dice_weight)
+        self.smooth = float(smooth)
+        self.batch_dice = bool(batch_dice)
+        if pos_weight is not None:
+            self.register_buffer("pos_weight", torch.tensor([float(pos_weight)], dtype=torch.float32))
+        else:
+            self.pos_weight = None
+
+    def forward(self, logits, targets):
+        targets = targets.to(dtype=logits.dtype)
+        bce = F.binary_cross_entropy_with_logits(
+            logits, targets, pos_weight=self.pos_weight
+        )
+
+        probs = torch.sigmoid(logits)
+        if self.batch_dice:
+            probs_flat = probs.reshape(-1)
+            targets_flat = targets.reshape(-1)
+            intersection = (probs_flat * targets_flat).sum()
+            dice_score = (2.0 * intersection + self.smooth) / (
+                probs_flat.sum() + targets_flat.sum() + self.smooth
+            )
+        else:
+            probs_flat = probs.reshape(probs.size(0), -1)
+            targets_flat = targets.reshape(targets.size(0), -1)
+            intersection = (probs_flat * targets_flat).sum(dim=1)
+            dice_score = (2.0 * intersection + self.smooth) / (
+                probs_flat.sum(dim=1) + targets_flat.sum(dim=1) + self.smooth
+            )
+            dice_score = dice_score.mean()
+
+        dice_loss = 1.0 - dice_score
+        return self.bce_weight * bce + self.dice_weight * dice_loss
+
+
+class TverskyFocalLoss(nn.Module):
+    """
+    Hàm mất mát Tversky-Focal:
+      - alpha < beta (mặc định 0.3 / 0.7) giúp phạt lỗi bỏ sót khối u (False Negative) nặng hơn.
+      - gamma < 1.0 (hoặc > 1.0 tùy quy ước lũy thừa) tập trung đạo hàm vào các ca khó.
+    """
+    def __init__(self, alpha=0.3, beta=0.7, gamma=0.75, smooth=1.0):
+        super().__init__()
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.gamma = float(gamma)
+        self.smooth = float(smooth)
+
+    def forward(self, logits, targets):
+        targets = targets.to(dtype=logits.dtype)
+        probs = torch.sigmoid(logits).reshape(-1)
+        targets_flat = targets.reshape(-1)
+
+        tp = (probs * targets_flat).sum()
+        fp = (probs * (1.0 - targets_flat)).sum()
+        fn = ((1.0 - probs) * targets_flat).sum()
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        return torch.pow(1.0 - tversky, self.gamma)
+
+
+@torch.no_grad()
+def compute_segmentation_metrics(logits, targets, threshold=0.5, eps=1e-6):
+    """
+    Tính toán các đại lượng cơ sở từ raw logits (B, 1, H, W) và nhãn (B, 1, H, W).
+    Trả về dict chứa intersection, pred_sum, target_sum để cộng dồn toàn Epoch.
+    """
+    probs = torch.sigmoid(logits)
+    preds = (probs >= threshold).to(torch.float32)
+    targets_bin = (targets > 0.5).to(torch.float32)
+
+    preds_f = preds.reshape(-1)
+    targets_f = targets_bin.reshape(-1)
+
+    inter = float((preds_f * targets_f).sum().item())
+    pred_sum = float(preds_f.sum().item())
+    target_sum = float(targets_f.sum().item())
+    union = pred_sum + target_sum - inter
+
+    dice = (2.0 * inter + eps) / (pred_sum + target_sum + eps)
+    iou = (inter + eps) / (union + eps)
+
+    return {
+        "intersection": inter,
+        "pred_sum": pred_sum,
+        "target_sum": target_sum,
+        "dice": dice,
+        "iou": iou,
+    }
+
+
+def _cmd_selftest(_):
+    print("Đang chạy kiểm thử tự động losses.py...")
+    targets = torch.zeros((4, 1, 64, 64), dtype=torch.float32)
+    targets[0:3, 0, 16:32, 16:32] = 1.0  # 3 lát có u, 1 lát âm tính
+
+    # 1. Dự đoán hoàn hảo (logits = +10 ở vùng u, -10 ở nền)
+    logits_good = torch.where(targets > 0.5, torch.tensor(10.0), torch.tensor(-10.0))
+    logits_good.requires_grad_(True)
+
+    criterion = DiceBCELoss(bce_weight=0.5, dice_weight=0.5)
+    loss_good = criterion(logits_good, targets)
+    loss_good.backward()
+
+    m_good = compute_segmentation_metrics(logits_good, targets)
+    assert loss_good.item() < 0.01, f"Loss dự đoán đúng phải ~0, nhận được: {loss_good.item()}"
+    assert m_good["dice"] > 0.999 and m_good["iou"] > 0.999
+    assert logits_good.grad is not None and not torch.isnan(logits_good.grad).any()
+
+    # 2. Dự đoán sai hoàn toàn (ngược với nhãn)
+    logits_bad = torch.where(targets > 0.5, torch.tensor(-10.0), torch.tensor(10.0))
+    loss_bad = criterion(logits_bad, targets)
+    m_bad = compute_segmentation_metrics(logits_bad, targets)
+    assert loss_bad.item() > 5.0 and m_bad["dice"] < 0.001
+
+    # 3. Kiểm thử TverskyFocalLoss
+    tf_loss = TverskyFocalLoss()(logits_good.detach(), targets)
+    assert tf_loss.item() < 0.01
+
+    print(
+        f"✅ selftest losses.py: OK! "
+        f"(Good Loss={loss_good.item():.5f}, Dice={m_good['dice']:.4f} | "
+        f"Bad Loss={loss_bad.item():.2f}, Dice={m_bad['dice']:.4f})"
+    )
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=False)
+    s = sub.add_parser("selftest", help="Kiểm thử hàm Loss và Metrics")
+    s.set_defaults(fn=_cmd_selftest)
+    args = ap.parse_args()
+    _cmd_selftest(args)
+
+--------------------------------------------------------------------------------
+FILE: src\medical_prep.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+medical_prep.py - Tiền xử lý CT theo pipeline DuneAI (s.primakov), tối ưu cho GPU.
+
+CÁC HÀM THEO MỤC TIÊU CỦA src/medical_prep.py
+  load_nrrd(path)                                  -> (volume (Z,H,W), spacing (x,y,z))
+  clip_and_window_hu(volume, ww, wl, step)         -> float32 [0,1]   (numpy)
+  window_hu_torch(x, ...)                          -> cùng công thức, chạy trên GPU
+  resize_and_pad_3d(volume, spacing, target_size, is_mask)
+  extract_lungs_mask(volume)                       -> mask phổi (chuyển thể get_seg_lungs + create_flipped_mask)
+
+THỨ TỰ BƯỚC (đúng Patient_data_generator._load_patient của tác giả):
+  1. Cắt đáy HU            img[img < -1000] = -1000
+  2. (Tùy chọn) tách phổi trên HU thô, lưới gốc 512x512, rồi che ngoài phổi bằng -1000
+  3. Resize mặt phẳng trục về 1 mm/pixel trên HU thô (trục z giữ nguyên)
+  4. Crop/pad về IMAGE_SIZE x IMAGE_SIZE, pad bằng -1000 HU (không khí)
+  5. Cửa sổ [WL - WW/2, WL + WW/2], CẬN DƯỚI BỊ KẸP Ở -1000   (_apply_window, dòng 455-457)
+  6. (Tùy chọn) lượng tử hóa theo RESAMPLING_STEP
+  7. Đưa về [0, 1]  (lựa chọn của dự án; tác giả dùng z-score tùy chọn)
+
+LƯU Ý VỀ CỬA SỔ: với WW=1500, WL=-600 cận dưới danh nghĩa là -1350 nhưng tác giả kẹp ở -1000, nên cửa sổ
+thực tế là [-1000, 150]. Mô tả "low = -1350" trong tài liệu cần đổi thành -1000, nếu không không khí sẽ là
+0.233 thay vì 0 và phần pad (0) sẽ lộ ra thành hình chữ nhật.
+
+KIẾN TRÚC TỐI ƯU
+  - Bước 1-4 nặng CPU và KHÔNG phụ thuộc epoch -> chạy MỘT LẦN bằng `build`, lưu .npy int16 HU.
+  - Mask phổi cũng được tính một lần (--extract-lungs) và lưu riêng; việc che ảnh làm lúc nạp (rẻ).
+  - Bước 5-7 là phép toán theo phần tử -> chạy trên GPU (window_hu_torch).
+  - .npy không nén + mmap: chỉ đọc đúng các lát cần dùng.
+
+KHÁC TÁC GIẢ (có chủ ý)
+  - Kích thước mới dùng round() thay vì int(); spacing áp đúng trục (x -> rộng, y -> cao).
+  - Nội suy ảnh mặc định "nearest" như tác giả (IMAGE_INTERP).
+  - Lượng tử hóa mặc định bật; tác giả để tùy chọn và tắt (quantize=False để giống tác giả).
+  - create_flipped_mask chỉ port method=0 (nhanh, không hiệu chỉnh lệch cột sống) - đây là cách get_seg_lungs gọi.
+  - Bỏ qua phần "kéo dãn mask phổi theo z khi khối u nằm ngoài" (dòng 101-130 của generator); phần hợp mask
+    khối u vào mask phổi (dòng 132-134) có trong apply_lung_mask.
+  - Gỡ phụ thuộc statsmodels và scipy.ndimage.measurements (đã deprecated).
+  - Hai chỗ thêm cho an toàn: lát không có xương thì bỏ qua khi tìm tâm phổi; mask phổi rỗng trả về None.
+
+SimpleITK: GetSpacing() trả về (x, y, z) còn mảng numpy có thứ tự (Z, Y, X).
+
+Dùng:
+  python medical_prep.py selftest
+  python medical_prep.py build --nrrd-dir <duneai_raw_nrrd> --cache-dir <cache_1mm> --workers 4 [--limit 3] [--extract-lungs]
+"""
+import argparse
+import json
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import cv2
+import numpy as np
+import SimpleITK as sitk
+
+try:
+    import torch
+except ImportError:          # viewer / máy không có torch vẫn dùng được các hàm numpy
+    torch = None
+
+# nạp các hằng số từ file config
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(ROOT))
+from configs.config import IMAGE_SIZE, WINDOW_WIDTH, WINDOW_LEVEL, RESAMPLING_STEP
+
+HU_FLOOR = -1000                 # đáy HU (không khí)
+IMAGE_INTERP = "nearest"         # nội suy ảnh khi resize; tác giả dùng nearest
+LUNG_THRESHOLD_HU = -320         # ngưỡng nhu mô phổi của tác giả
+TRACHEA_COEFF = 0.0069           # tác giả đặt 0.0053 (dòng 229) rồi ghi đè bằng 0.0069 (dòng 230)
+_CV2_INTERP = {
+    "nearest": cv2.INTER_NEAREST,
+    "linear": cv2.INTER_LINEAR,
+    "area": cv2.INTER_AREA,
+    "cubic": cv2.INTER_CUBIC,
+}
+
+
+# ======================================================================
+# 1. ĐỌC DỮ LIỆU
+# ======================================================================
+def load_nrrd(file_path):
+    """
+    Đọc file NRRD bằng SimpleITK.
+    Trả về:
+        - volume: mảng numpy 3D (Z, H, W)
+        - spacing: tuple (spacing_x, spacing_y, spacing_z) theo mm  (thứ tự của SimpleITK)
+    """
+    sitk_img = sitk.ReadImage(str(file_path))
+    volume = sitk.GetArrayFromImage(sitk_img)      # (Z, H, W)
+    spacing = sitk_img.GetSpacing()                # (x, y, z)
+    return volume, spacing
+
+
+# ======================================================================
+# 2. CỬA SỔ HU + LƯỢNG TỬ HÓA  (numpy cho viewer/test, torch cho GPU)
+# ======================================================================
+def window_bounds(ww=WINDOW_WIDTH, wl=WINDOW_LEVEL):
+    """Giống _apply_window của tác giả: cận dưới bị kẹp ở -1000. Mặc định (1500, -600) -> [-1000, 150]."""
+    assert 0 < ww < 2000 and -1000 < wl < 200, "WW/WL ngoài miền hợp lệ của tác giả"
+    low = max(wl - ww / 2.0, HU_FLOOR)
+    high = wl + ww / 2.0
+    return low, high
+
+
+def clip_and_window_hu(volume, ww=WINDOW_WIDTH, wl=WINDOW_LEVEL, step=RESAMPLING_STEP, quantize=True):
+    """
+    Phiên bản numpy (CPU). Đầu vào là HU THÔ (nên là ảnh đã resize và pad -1000).
+    1) cắt đáy -1000  2) kẹp cửa sổ  3) lượng tử hóa theo `step`  4) chuẩn hóa về [0, 1].
+    Không sửa mảng đầu vào. Đầu ra float32; không khí = 0.
+    """
+    low, high = window_bounds(ww, wl)
+    vol = np.clip(volume.astype(np.float32), low, high)          # gộp bước cắt đáy và cửa sổ
+    if quantize:                                                  # bin = floor((HU - low) / step)
+        vol = np.floor((vol - low) / step) * step + low
+    return (vol - low) / (high - low)
+
+
+def window_hu_torch(x, ww=WINDOW_WIDTH, wl=WINDOW_LEVEL, step=RESAMPLING_STEP, quantize=True, out_dtype=None):
+    """
+    Phiên bản GPU: cùng công thức với clip_and_window_hu nhưng chạy trên tensor (cuda).
+    x: tensor int16/float bất kỳ shape (HU). out_dtype: ví dụ torch.float16 để tiết kiệm VRAM.
+    """
+    assert torch is not None, "Cần cài PyTorch để dùng window_hu_torch"
+    low, high = window_bounds(ww, wl)
+    x = torch.clamp(x.to(torch.float32), low, high)
+    if quantize:
+        x = torch.floor((x - low) / step) * step + low
+    x = (x - low) / (high - low)
+    return x if out_dtype is None else x.to(out_dtype)
+
+
+# ======================================================================
+# 3. RESIZE VỀ 1 mm/PIXEL + CROP/PAD  (làm trên HU thô)
+# ======================================================================
+def resize_to_1mm_3d(volume, spacing, is_mask=False, interp=IMAGE_INTERP):
+    """
+    Đưa mặt phẳng trục về 1 mm/pixel (CHƯA pad). Trục z giữ nguyên như tác giả.
+    Mask luôn dùng nearest để không tạo giá trị trung gian.
+    """
+    sx, sy = float(spacing[0]), float(spacing[1])
+    z, h, w = volume.shape
+    new_h, new_w = max(1, int(round(h * sy))), max(1, int(round(w * sx)))
+
+    if is_mask:
+        src = (volume > 0).astype(np.uint8)
+        flag = cv2.INTER_NEAREST
+    else:
+        src = np.ascontiguousarray(volume)
+        flag = _CV2_INTERP[interp]
+
+    out = np.empty((z, new_h, new_w), dtype=src.dtype)
+    for i in range(z):
+        out[i] = cv2.resize(src[i], (new_w, new_h), interpolation=flag)
+    return out
+
+
+def _axis_window(n, size):
+    """Trả về (bắt đầu nguồn, bắt đầu đích, độ dài) khi crop (n>=size) hoặc pad (n<size) vào giữa."""
+    if n >= size:
+        return (n - size) // 2, 0, size
+    return 0, (size - n) // 2, n
+
+
+def pad_or_crop_xy(x, size=IMAGE_SIZE, pad_value=HU_FLOOR):
+    """
+    Crop hoặc pad hai chiều cuối về (size, size), đặt giữa. Dùng được cho numpy (kể cả memmap) và torch.
+    Ảnh HU: pad_value = -1000. Mask: pad_value = 0.
+    """
+    h, w = x.shape[-2:]
+    sy, dy, ly = _axis_window(h, size)
+    sx, dx, lx = _axis_window(w, size)
+    shape = (*x.shape[:-2], size, size)
+    if torch is not None and isinstance(x, torch.Tensor):
+        out = torch.full(shape, pad_value, dtype=x.dtype, device=x.device)
+    else:
+        out = np.full(shape, pad_value, dtype=x.dtype)
+    out[..., dy:dy + ly, dx:dx + lx] = x[..., sy:sy + ly, sx:sx + lx]
+    return out
+
+
+def resize_and_pad_3d(volume, spacing, target_size=IMAGE_SIZE, is_mask=False, pad_value=None, interp=IMAGE_INTERP):
+    """
+    Một pixel ảnh = 1 mm thực tế, rồi crop/pad về target_size x target_size.
+    pad_value mặc định: -1000 (HU, không khí) cho ảnh; 0 cho mask.
+    LƯU Ý: truyền HU THÔ (chưa cửa sổ). Nếu truyền ảnh đã chuẩn hóa thì phải tự đặt pad_value = 0.
+    """
+    if pad_value is None:
+        pad_value = 0 if is_mask else HU_FLOOR
+    small = resize_to_1mm_3d(volume, spacing, is_mask=is_mask, interp=interp)
+    return pad_or_crop_xy(small, target_size, pad_value)
+
+
+# ======================================================================
+# 4. TÁCH PHỔI  (chuyển thể lung_extraction_funcs_13_09.py của tác giả)
+#    Chạy trên HU THÔ ở lưới gốc (512x512 trong LIDC), TRƯỚC khi resize.
+# ======================================================================
+def _import_lung_deps():
+    try:
+        from skimage.measure import label, regionprops
+        from skimage.segmentation import clear_border
+        from skimage.filters import roberts
+        from scipy import ndimage as ndi
+    except ImportError as e:
+        raise ImportError("extract_lungs_mask cần scikit-image và scipy: pip install scikit-image scipy") from e
+    return label, regionprops, clear_border, roberts, ndi
+
+
+def _get_kernel():
+    """Kernel hình tròn 11x11 kèm 8 điểm nhô ra, y hệt get_kernel của tác giả."""
+    kernel = np.zeros((11, 11), np.uint8)
+    kernel = cv2.circle(kernel, (5, 5), 4, 1, -1)
+    for i in [4, 6]:
+        for j in [1, 9]:
+            kernel[i, j] = 1
+            kernel[j, i] = 1
+    return kernel
+
+
+def _find_bounds_z_direction(image):
+    z_dist = np.sum(image, axis=(1, 2))
+    zi = np.where(z_dist != 0)
+    return int((np.max(zi) - np.min(zi)) / 2), int(np.min(zi)), int(np.max(zi))
+
+
+def _largest_labeled_volumes(im, bg=-1, ratio=0.6):
+    """
+    Giữ nguyên hành vi của tác giả: trả về nhãn lớn nhất; chỉ khi có ĐÚNG MỘT nhãn có thể tích
+    trong (ratio, 1) so với nhãn lớn nhất thì trả thêm nhãn đó (để gộp phổi trái/phải bị tách).
+    """
+    vals, counts = np.unique(im, return_counts=True)
+    counts = counts[vals != bg]
+    vals = vals[vals != bg]
+    if len(counts) == 0:
+        return None
+    counts = counts / np.max(counts)
+    cand = np.where((counts > ratio) & (counts < 1))[0]
+    if len(cand) == 1:
+        smax = np.where(counts == counts[cand[0]])[0][0]
+        return vals[[np.argmax(counts), smax]]
+    return [vals[np.argmax(counts)]]
+
+
+def _create_flipped_mask(image, i_orig, kernel):
+    """
+    method=0 của tác giả: tìm tâm phổi theo phân bố xương (> 100 HU) rồi lật đối xứng mask qua tâm
+    để mask phổi bao cả khối đặc dính thành ngực/trung thất. Trả về (mask, min_bound, max_bound).
+    """
+    _, min_bound, max_bound = _find_bounds_z_direction(image)
+    fl_mask = np.zeros(image.shape, np.uint8)
+
+    lc_buff = []
+    for i in range(min_bound, max_bound + 1):
+        rib_view = 1 * (i_orig[i, ...] > 100)
+        distr = np.sum(rib_view, axis=0)
+        thresh_l1 = np.max(distr)
+        if thresh_l1 == 0:                    # (thêm) lát không có xương: bỏ qua
+            continue
+        idx = np.where(distr > (thresh_l1 * 0.15))[0]
+        lc_buff.append((np.min(idx) + np.max(idx)) / 2)
+    lungs_center = int(np.mean(lc_buff)) if lc_buff else image.shape[2] // 2
+    half = int(image.shape[2] / 2)
+    W = image.shape[2]
+
+    for i in range(min_bound, max_bound + 1):
+        ax = image[i, ...]
+        if lungs_center > half:
+            part1 = ax[:, 2 * lungs_center - W:lungs_center]
+            part2 = np.hstack((ax[:, lungs_center:], np.zeros((image.shape[1], 2 * lungs_center - W))))
+            part2 = cv2.dilate(np.array(part2, np.uint8), kernel, iterations=1)
+            part1 = cv2.dilate(np.array(part1, np.uint8), kernel, iterations=1)
+            fl_mask[i, ...] = np.hstack((np.flip(part2, axis=1), np.flip(part1, axis=1)))
+            fl_mask[i, ...] = np.array(fl_mask[i, ...], np.uint8) | np.array(ax, np.uint8)
+        elif lungs_center < half:
+            part1 = np.hstack((np.zeros((image.shape[1], W - 2 * lungs_center)), ax[:, :lungs_center]))
+            part2 = ax[:, lungs_center:W - (W - 2 * lungs_center)]
+            part2 = cv2.dilate(np.array(part2, np.uint8), kernel, iterations=1)
+            part1 = cv2.dilate(np.array(part1, np.uint8), kernel, iterations=1)
+            fl_mask[i, ...] = np.hstack((np.flip(part2, axis=1), np.flip(part1, axis=1)))
+            fl_mask[i, ...] = np.array(fl_mask[i, ...], np.uint8) | np.array(ax, np.uint8)
+        else:
+            fl = np.flip(ax, axis=1)
+            fl_mask[i, ...] = np.array(ax, np.uint8) | np.array(fl, np.uint8)
+    return fl_mask, min_bound, max_bound
+
+
+def extract_lungs_mask(volume, return_bounds=False):
+    """
+    Chuyển thể get_seg_lungs của tác giả. Đầu vào: HU thô (Z, H, W) ở lưới gốc.
+    Các bước: ngưỡng < -320 HU -> clear_border (bỏ không khí ngoài, bàn chụp) -> giữ 3 vùng lớn nhất
+    -> roberts + binary_fill_holes (lấp mạch máu) -> bỏ khí quản (vùng nhỏ hơn 0.0069*sq/512^2)
+    -> bỏ bàn/túi khí (tâm khối nằm dưới 75% chiều cao) -> giữ khối liên thông 3D lớn nhất
+    -> lật đối xứng qua tâm cột sống -> morphology -> kéo dãn +-2 lát theo z.
+    Trả về mask uint8 (Z, H, W) gồm 0/1, hoặc None nếu không tìm thấy phổi.
+    Chạy chậm (vòng lặp từng lát) nên chỉ gọi trong build, không gọi trong vòng huấn luyện.
+    """
+    label, regionprops, clear_border, roberts, ndi = _import_lung_deps()
+    im = np.asarray(volume)
+    kernel = _get_kernel()
+    sq = im.shape[1] * im.shape[2]
+    seg = np.zeros(im.shape, np.uint8)
+
+    # --- ngưỡng, bỏ vùng chạm biên, giữ 3 vùng lớn nhất, lấp lỗ ---
+    for nm, ax_slice in enumerate(im < LUNG_THRESHOLD_HU):
+        lab = label(clear_border(ax_slice))
+        areas = sorted(r.area for r in regionprops(lab))
+        if len(areas) > 3:
+            for r in regionprops(lab):
+                if r.area < areas[-3]:
+                    lab[lab == r.label] = 0
+        seg[nm] = ndi.binary_fill_holes(roberts(lab > 0))
+
+    # --- bỏ khí quản: vùng nhỏ hơn TRACHEA_COEFF * (sq / 512^2) diện tích ảnh ---
+    trachea_coeff = TRACHEA_COEFF * (sq / (512 ** 2))
+    for i, ax_slice in enumerate(seg):
+        lab = label(ax_slice, connectivity=1, background=0)
+        vals, counts = np.unique(lab, return_counts=True)
+        counts, vals = counts[vals != 0], vals[vals != 0]
+        small = counts / sq < trachea_coeff
+        if small.any():
+            for v in vals[small]:
+                lab[lab == v] = 0
+            seg[i] = lab != 0
+
+    # --- bỏ bàn chụp và túi khí: tâm khối ở dưới 75% chiều cao ảnh ---
+    lab3 = label(seg, background=0)
+    ids = np.unique(lab3)
+    ids = ids[ids != 0]
+    if len(ids):
+        centers = ndi.center_of_mass(np.ones_like(lab3), lab3, ids)
+        for i, c in zip(ids, centers):
+            if c[1] > seg.shape[1] * 0.75:
+                seg[lab3 == i] = 0
+
+    # --- giữ khối liên thông 3D lớn nhất (gộp phổi trái/phải nếu tách đôi) ---
+    lab3 = label(seg, background=0)
+    l_max = _largest_labeled_volumes(lab3, bg=0)
+    if l_max is not None:
+        if len(l_max) > 1:
+            lab3[lab3 == l_max[1]] = l_max[0]
+        seg[lab3 != l_max[0]] = 0
+    if seg.sum() == 0:
+        return None
+
+    # --- lật đối xứng qua tâm cột sống ---
+    seg, min_bound, max_bound = _create_flipped_mask(seg, im, kernel)
+
+    # --- morphology: lấp khoảng trống nhỏ trong mask ---
+    for i, ax_slice in enumerate(seg):
+        bi = np.array(ax_slice, np.uint8)
+        opening = cv2.morphologyEx(1 - bi, cv2.MORPH_OPEN, kernel, iterations=7)
+        dilat = cv2.dilate(1 - opening, kernel, iterations=2)
+        seg[i, ...] = cv2.erode(dilat, kernel, iterations=1)
+
+    # --- kéo dãn mask +-2 lát theo z ---
+    if (min_bound > 2) and (max_bound < seg.shape[0] - 2):
+        for i in range(1, 3):
+            seg[min_bound - i, ...] = seg[min_bound, ...]
+            seg[max_bound + i, ...] = seg[max_bound, ...]
+        min_bound -= 2
+        max_bound += 2
+
+    seg = (seg > 0).astype(np.uint8)
+    return (seg, min_bound, max_bound) if return_bounds else seg
+
+
+def lung_keep_mask(lung_mask, tumor_mask=None, tumor_dilate_iter=3):
+    """
+    Vùng được giữ lại = phổi, hợp với mask khối u/nốt đã dilate (kernel 11x11, 3 lần) - như generator dòng 132-134.
+    CHỈ truyền tumor_mask lúc HUẤN LUYỆN. Lúc đánh giá/dự đoán mà truyền mask thật vào thì ảnh đầu vào đã
+    chứa thông tin nhãn (rò rỉ).
+    """
+    keep = (lung_mask > 0).astype(np.uint8)
+    if tumor_mask is not None:
+        kernel = _get_kernel()
+        for k in range(len(keep)):
+            if tumor_mask[k].any():
+                keep[k] |= cv2.dilate((tumor_mask[k] > 0).astype(np.uint8), kernel, iterations=tumor_dilate_iter)
+    return keep
+
+
+def apply_lung_mask(volume_hu, keep, fill=HU_FLOOR):
+    """Đặt mọi voxel ngoài vùng giữ lại về -1000 HU (apply_mask của tác giả). Không sửa mảng đầu vào."""
+    out = np.array(volume_hu, copy=True)
+    out[np.asarray(keep) == 0] = fill
+    return out
+
+
+# ======================================================================
+# 5. CACHE MỘT LẦN (CPU)  ->  .npy int16 HU ở 1 mm, chưa pad
+# ======================================================================
+CACHE_VERSION = 2
+
+
+def cache_paths(out_dir):
+    out_dir = Path(out_dir)
+    return out_dir / "image_1mm.npy", out_dir / "mask_1mm.npy", out_dir / "meta.json"
+
+
+def lung_cache_path(out_dir):
+    return Path(out_dir) / "lung_1mm.npy"
+
+
+def _save_npy(path, arr):
+    tmp = Path(str(path) + ".tmp")
+    with open(tmp, "wb") as f:
+        np.save(f, arr)
+    os.replace(tmp, path)
+
+
+def build_patient_cache(patient_dir, out_dir, interp=IMAGE_INTERP, overwrite=False, extract_lungs=False):
+    """
+    Bước 1-3 cho một bệnh nhân: đọc image.nrrd (+ mask.nrrd), cắt đáy -1000, (tùy chọn) tách phổi, resize 1 mm.
+    Ảnh lưu int16 HU, mask uint8. Mask phổi lưu riêng (lung_1mm.npy), KHÔNG áp vào ảnh trong cache.
+    Pad về IMAGE_SIZE làm lúc nạp (rất rẻ) để cache nhỏ hơn.
+    """
+    patient_dir, out_dir = Path(patient_dir), Path(out_dir)
+    img_p, msk_p, meta_p = cache_paths(out_dir)
+    lung_p = lung_cache_path(out_dir)
+    done = img_p.exists() and msk_p.exists() and meta_p.exists() and (lung_p.exists() or not extract_lungs)
+    if not overwrite and done:
+        return "skip"
+
+    image_nrrd, mask_nrrd = patient_dir / "image.nrrd", patient_dir / "mask.nrrd"
+    if not image_nrrd.exists():
+        return "missing_image"
+
+    vol, spacing = load_nrrd(image_nrrd)
+    vol = np.maximum(vol, HU_FLOOR).astype(np.int16)             # bước 1: cắt đáy -1000 HU
+
+    if mask_nrrd.exists():
+        msk, _ = load_nrrd(mask_nrrd)
+        if msk.shape != vol.shape:
+            raise ValueError(f"mask {msk.shape} khác image {vol.shape}")
+    else:
+        msk = np.zeros_like(vol, dtype=np.uint8)
+
+    lung1, lung_meta = None, {}
+    if extract_lungs:                                            # bước 2: tách phổi trên lưới gốc
+        lung = extract_lungs_mask(vol)
+        if lung is None:
+            lung_meta = {"lung_ok": False}
+            lung1 = np.zeros((vol.shape[0], ) + resize_to_1mm_3d(vol[:1], spacing).shape[1:], np.uint8)
+        else:
+            n_nod = int((msk > 0).sum())
+            lung_meta = {
+                "lung_ok": True,
+                "lung_voxels_orig": int(lung.sum()),
+                # tỉ lệ voxel nốt nằm trong mask phổi: thấp nghĩa là che ảnh bằng mask phổi sẽ cắt mất nốt
+                "mask_in_lung_fraction": (float(((msk > 0) & (lung > 0)).sum() / n_nod) if n_nod else None),
+            }
+            lung1 = resize_to_1mm_3d(lung, spacing, is_mask=True)
+
+    img1 = resize_to_1mm_3d(vol, spacing, is_mask=False, interp=interp)      # bước 3
+    msk1 = resize_to_1mm_3d(msk, spacing, is_mask=True)
+
+    sx, sy, sz = (float(s) for s in spacing)
+    meta = {
+        "cache_version": CACHE_VERSION,
+        "interp": interp,
+        "orig_shape_zyx": list(vol.shape),
+        "orig_spacing_xyz": [sx, sy, sz],
+        "shape_1mm_zyx": list(img1.shape),
+        "mask_voxels_orig": int((msk > 0).sum()),
+        "mask_voxels_1mm": int(msk1.sum()),
+        "mask_volume_mm3_orig": float((msk > 0).sum() * sx * sy * sz),
+        "mask_volume_mm3_1mm": float(msk1.sum() * 1.0 * 1.0 * sz),
+        **lung_meta,
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _save_npy(img_p, img1)
+    _save_npy(msk_p, msk1)
+    if lung1 is not None:
+        _save_npy(lung_p, lung1)
+    with open(meta_p, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return "ok"
+
+
+def load_cached(cache_dir, mmap=True):
+    """Trả về (image_1mm, mask_1mm, meta). Với mmap=True chỉ đọc phần dữ liệu thật sự được truy cập."""
+    img_p, msk_p, meta_p = cache_paths(cache_dir)
+    mode = "r" if mmap else None
+    img = np.load(img_p, mmap_mode=mode)
+    msk = np.load(msk_p, mmap_mode=mode)
+    with open(meta_p, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    return img, msk, meta
+
+
+def load_cached_slices(cache_dir, z_indices, size=IMAGE_SIZE, with_lung=False):
+    """
+    Nạp các lát z_indices đã pad về (K, size, size): ảnh int16 HU (pad -1000), mask uint8 (pad 0),
+    và (nếu with_lung) mask phổi uint8. Đầu ra là HU thô -> áp lung_keep_mask/apply_lung_mask nếu cần,
+    chuyển lên GPU rồi gọi window_hu_torch.
+    """
+    img, msk, _ = load_cached(cache_dir, mmap=True)
+    z = np.asarray(z_indices)
+    out = [pad_or_crop_xy(np.asarray(img[z]), size, HU_FLOOR),
+           pad_or_crop_xy(np.asarray(msk[z]), size, 0)]
+    if with_lung:
+        lung = np.load(lung_cache_path(cache_dir), mmap_mode="r")
+        out.append(pad_or_crop_xy(np.asarray(lung[z]), size, 0))
+    return tuple(out)
+
+
+# ======================================================================
+# 6. CLI
+# ======================================================================
+def _worker(args):
+    pid, nrrd_dir, cache_dir, interp, overwrite, extract_lungs = args
+    cv2.setNumThreads(1)                       # tránh tranh chấp luồng khi chạy nhiều tiến trình
+    try:
+        return pid, build_patient_cache(Path(nrrd_dir) / pid, Path(cache_dir) / pid, interp, overwrite, extract_lungs)
+    except Exception as e:                     # một ca lỗi không làm dừng cả lượt chạy
+        return pid, f"error: {e}"
+
+
+def _cmd_build(a):
+    nrrd_dir, cache_dir = Path(a.nrrd_dir), Path(a.cache_dir)
+    pids = sorted(p.name for p in nrrd_dir.iterdir() if p.is_dir())
+    if a.limit:
+        pids = pids[:a.limit]
+    print(f"{len(pids)} bệnh nhân -> {cache_dir}" + (" (có tách phổi, chậm hơn nhiều)" if a.extract_lungs else ""))
+    jobs = [(p, str(nrrd_dir), str(cache_dir), a.interp, a.overwrite, a.extract_lungs) for p in pids]
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = lambda x, **k: x                # noqa: E731
+
+    results = []
+    if a.workers > 1:
+        with ProcessPoolExecutor(max_workers=a.workers) as ex:
+            for r in tqdm(ex.map(_worker, jobs), total=len(jobs)):
+                results.append(r)
+    else:
+        for j in tqdm(jobs):
+            results.append(_worker(j))
+
+    bad = [(p, s) for p, s in results if s not in ("ok", "skip")]
+    print(f"Xong: {sum(s == 'ok' for _, s in results)} mới, {sum(s == 'skip' for _, s in results)} bỏ qua, {len(bad)} lỗi")
+    for p, s in bad:
+        print("  ", p, s)
+
+
+def _phantom_ct(z=14):
+    """CT tổng hợp: thân người, hai phổi, khí quản, cột sống (xương), bàn chụp, không khí ngoài khung."""
+    yy, xx = np.mgrid[:512, :512]
+    vol = np.full((z, 512, 512), -1000, np.int16)
+    vol[:, ((yy - 256) / 170.0) ** 2 + ((xx - 256) / 225.0) ** 2 <= 1] = 40          # thân
+    lung_l = ((yy - 250) / 110.0) ** 2 + ((xx - 140) / 60.0) ** 2 <= 1
+    lung_r = ((yy - 250) / 110.0) ** 2 + ((xx - 372) / 60.0) ** 2 <= 1
+    vol[:, lung_l | lung_r] = -800                                                    # phổi
+    vol[:, (yy - 230) ** 2 + (xx - 256) ** 2 <= 100] = -950                           # khí quản
+    vol[:, (yy - 340) ** 2 + (xx - 256) ** 2 <= 18 ** 2] = 300                        # cột sống
+    vol[:, 432:438, 110:400] = 60                                                     # bàn chụp
+    return vol, (lung_l | lung_r)
+
+
+def _cmd_selftest(_):
+    rng = np.random.default_rng(0)
+    spacing = (0.7, 0.7, 2.5)
+    vol = rng.integers(-1024, 1500, size=(6, 512, 512)).astype(np.int16)
+    vol[:, :60, :] = -2000                                           # mô phỏng vùng ngoài khung quét
+
+    r = resize_and_pad_3d(vol, spacing)
+    assert r.shape == (6, 512, 512), r.shape
+    assert (r[:, :5, :] == HU_FLOOR).all() and (r[:, :, :5] == HU_FLOOR).all(), "pad phải là -1000 HU"
+
+    n = clip_and_window_hu(r)
+    assert n.dtype == np.float32 and n.min() == 0.0 and n.max() <= 1.0, (n.min(), n.max())
+    assert (n[:, :5, :] == 0).all(), "viền pad phải bằng không khí (0) sau cửa sổ"
+    assert len(np.unique(n)) <= 47, len(np.unique(n))
+    assert vol.min() == -2000, "không được sửa mảng đầu vào"
+
+    m = np.zeros(vol.shape, np.uint8)
+    m[3, 100:110, 100:110] = 1
+    mr = resize_and_pad_3d(m, spacing, is_mask=True)
+    assert set(np.unique(mr)) <= {0, 1} and mr.sum() > 0 and mr.shape == (6, 512, 512)
+
+    big = resize_and_pad_3d(vol, (1.5, 1.5, 2.5))                    # 768 mm > 512 -> crop
+    assert big.shape == (6, 512, 512)
+    print("resize/pad/cửa sổ: OK")
+
+    if torch is not None:
+        t = window_hu_torch(torch.from_numpy(r)).numpy()
+        assert np.allclose(t, n, atol=1e-6), "torch và numpy phải cho cùng kết quả"
+        print("torch == numpy: OK")
+    else:
+        print("(bỏ qua so sánh torch: chưa cài PyTorch)")
+
+    try:
+        _import_lung_deps()
+    except ImportError:
+        print("(bỏ qua kiểm thử tách phổi: chưa cài scikit-image/scipy)")
+    else:
+        ph, truth = _phantom_ct()
+        lung = extract_lungs_mask(ph)
+        assert lung is not None and lung.shape == ph.shape
+        mid = ph.shape[0] // 2
+        inter = (lung[mid] > 0) & truth
+        union = (lung[mid] > 0) | truth
+        iou = inter.sum() / union.sum()
+        assert iou > 0.8, f"IoU phổi quá thấp: {iou:.3f}"
+        assert lung[mid, 230, 256] == 0, "khí quản phải bị loại"
+        assert lung[mid, 5, 5] == 0 and lung[mid, 435, 250] == 0, "không khí ngoài và bàn chụp phải bị loại"
+        print(f"tách phổi trên phantom: OK (IoU = {iou:.3f})")
+    print("selftest OK")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build", help="tạo cache 1 mm (chạy một lần)")
+    b.add_argument("--nrrd-dir", default=str(ROOT / "data" / "duneai_raw_nrrd"))
+    b.add_argument("--cache-dir", default=str(ROOT / "data" / "cache_1mm"))
+    b.add_argument("--workers", type=int, default=1)
+    b.add_argument("--limit", type=int, default=0, help="chỉ xử lý N ca đầu (0 = tất cả)")
+    b.add_argument("--interp", choices=list(_CV2_INTERP), default=IMAGE_INTERP)
+    b.add_argument("--overwrite", action="store_true")
+    b.add_argument("--extract-lungs", action="store_true", help="tính và lưu thêm mask phổi (lung_1mm.npy)")
+    b.set_defaults(fn=_cmd_build)
+
+    s = sub.add_parser("selftest", help="kiểm thử bằng dữ liệu tổng hợp")
+    s.set_defaults(fn=_cmd_selftest)
+
+    args = ap.parse_args()
+    args.fn(args)
+
+--------------------------------------------------------------------------------
+FILE: src\models\custom_backbone.py
+--------------------------------------------------------------------------------
+
+
+
+--------------------------------------------------------------------------------
+FILE: src\models\dune_unet.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+dune_unet.py - Kiến trúc mạng nơ-ron cho dự án DuneAI.
+Hỗ trợ đầu vào 2.5D (3 kênh: lát z-1, z, z+1) và đầu ra 1 kênh (mặt nạ khối u).
+Được thiết kế theo dạng Module để dễ dàng cắm rút và nâng cấp lên Mamba-UNet.
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DoubleConv(nn.Module):
+    """Khối tích chập kép cơ bản của U-Net: Conv2d -> BatchNorm -> ReLU -> Conv2d -> BatchNorm -> ReLU"""
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super().__init__()
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class Down(nn.Module):
+    """Khối thu nhỏ (Encoder): MaxPool2d để giảm kích thước ảnh một nửa, sau đó dùng DoubleConv"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Up(nn.Module):
+    """Khối phóng to (Decoder) và kết nối chéo (Skip Connection)"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        # Dùng ConvTranspose2d để phóng to ảnh lên gấp đôi
+        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+        self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        # Phóng to x1 (từ lớp dưới lên)
+        x1 = self.up(x1)
+        
+        # Xử lý trường hợp kích thước ảnh bị lẻ (padding để khớp với x2)
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        
+        # Kết nối chéo: Nối ma trận đặc trưng x2 (từ Encoder) với x1 (vừa phóng to)
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+
+class OutConv(nn.Module):
+    """Lớp xuất cuối cùng: Chuyển số lượng kênh đặc trưng về số lượng lớp nhãn (1 kênh)"""
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class DuneUNet(nn.Module):
+    def __init__(self, in_channels=3, classes=1, features=64):
+        """
+        Khởi tạo mạng DuneUNet cho chuẩn 2.5D.
+        - in_channels: 3 (Lát cắt Z-1, Z, Z+1).
+        - classes: 1 (Dự đoán pixel có phải là khối u hay không).
+        - features: Số lượng bộ lọc (filter) cơ sở. Càng lớn mạng càng thông minh nhưng ngốn VRAM.
+        """
+        super(DuneUNet, self).__init__()
+        self.in_channels = in_channels
+        self.classes = classes
+
+        # 1. ENCODER (Khối chiết xuất đặc trưng - Dần dần thu nhỏ ảnh, tăng số kênh)
+        self.inc = DoubleConv(in_channels, features)
+        self.down1 = Down(features, features * 2)
+        self.down2 = Down(features * 2, features * 4)
+        self.down3 = Down(features * 4, features * 8)
+        
+        # 2. BOTTLENECK (Đáy chữ U - Điểm sâu nhất của mạng)
+        # NƠI CẤY GHÉP MAMBA: Sau này bạn có thể thay thế DoubleConv ở đây bằng các khối MambaVision 
+        # để tăng khả năng nắm bắt bối cảnh toàn cục (Global Context).
+        self.down4 = Down(features * 8, features * 16)
+        
+        # 3. DECODER (Khối giải mã - Dần dần phóng to ảnh, giảm số kênh)
+        self.up1 = Up(features * 16, features * 8)
+        self.up2 = Up(features * 8, features * 4)
+        self.up3 = Up(features * 4, features * 2)
+        self.up4 = Up(features * 2, features)
+        
+        # Lớp đầu ra (Logits)
+        self.outc = OutConv(features, classes)
+        
+        # Khởi tạo bias âm để mô hình bắt đầu với xác suất nền cao (u rất nhỏ so với ảnh)
+        nn.init.constant_(self.outc.conv.bias, -4.0)
+
+    def forward(self, x):
+        # Đi xuống (Encoder)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        
+        # Đáy (Bottleneck)
+        x5 = self.down4(x4)
+        
+        # Đi lên (Decoder + Skip Connections)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        
+        logits = self.outc(x)
+        return logits
+
+
+if __name__ == "__main__":
+    import time
+    
+    print("="*50)
+    print("🧠 KIỂM THỬ KIẾN TRÚC DUNE U-NET 2.5D")
+    print("="*50)
+    
+    # 1. Khởi tạo mô hình
+    model = DuneUNet(in_channels=3, classes=1)
+    
+    # Kích hoạt GPU nếu có (hoặc dùng CPU nếu PyTorch đang cài chưa có CUDA)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    print(f"Mô hình đang chạy trên thiết bị: {device}")
+    
+    # Đếm số lượng tham số học được (Parameters)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Tổng số tham số của mô hình: {total_params:,}")
+    
+    # 2. Tạo một Tensor giả lập Batch đầu vào (Kích thước giống hệt DataLoader)
+    # Batch size = 4, Channels = 3, H=512, W=512
+    batch_size = 4
+    dummy_input = torch.randn(batch_size, 3, 512, 512).to(device)
+    print(f"Kích thước Tensor đầu vào  : {dummy_input.shape}")
+    
+    # 3. Chạy qua mạng nơ-ron (Forward pass)
+    start_time = time.time()
+    with torch.no_grad(): # Tắt tính đạo hàm vì chỉ đang test tốc độ forward
+        output = model(dummy_input)
+    end_time = time.time()
+    
+    print(f"Kích thước Tensor đầu ra   : {output.shape}")
+    print(f"Thời gian xử lý 1 batch    : {(end_time - start_time)*1000:.2f} ms")
+    
+    # 4. Nghiệm thu
+    assert output.shape == (batch_size, 1, 512, 512), "LỖI: Kích thước đầu ra không đúng chuẩn!"
+    print("✅ KIỂM THỬ THÀNH CÔNG: Kiến trúc mạng hoàn toàn hợp lệ.")
+
+--------------------------------------------------------------------------------
+FILE: src\offline_builder.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+offline_builder.py - Lọc lát cắt, cân bằng âm/dương và chia tập Train/Val từ cache_1mm.
+
+Dùng:
+  python offline_builder.py selftest
+  python offline_builder.py build --cache-dir data/cache_1mm
+"""
+import argparse
+import json
+import random
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# Nạp cấu hình và các hàm lõi từ medical_prep.py (cùng thư mục)
+THIS_DIR = Path(__file__).resolve().parent
+ROOT = THIS_DIR.parent
+for p in (str(THIS_DIR), str(ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from configs.config import TUMOR_SIZE_LOW_LIM, ZERO_SL_RATIO, VAL_SPLIT, SEED
+from medical_prep import load_cached, lung_cache_path
+
+
+def build_dataset_index(
+    cache_dir,
+    out_csv_path=None,
+    tumor_size_low_lim=TUMOR_SIZE_LOW_LIM,
+    zero_sl_ratio=ZERO_SL_RATIO,
+    val_split=VAL_SPLIT,
+    seed=SEED,
+    require_lung=True,
+):
+    """
+    Quét thư mục cache_1mm, lọc lát cắt theo tiêu chuẩn y khoa của DuneAI và xuất slices.csv.
+    Lưu ý: mask_1mm.npy đã ở tỷ lệ 1mm/pixel nên 1 pixel = 1.0 mm^2.
+    """
+    cache_dir = Path(cache_dir)
+    if out_csv_path is None:
+        out_csv_path = cache_dir / "slices.csv"
+    out_csv_path = Path(out_csv_path)
+
+    if not cache_dir.exists():
+        raise FileNotFoundError(f"Không tìm thấy thư mục cache: {cache_dir}")
+
+    patient_ids = sorted([
+        p.name for p in cache_dir.iterdir()
+        if p.is_dir() and (p / "meta.json").exists() and (p / "image_1mm.npy").exists()
+    ])
+    if not patient_ids:
+        raise RuntimeError(f"Không tìm thấy bệnh nhân hợp lệ nào trong {cache_dir}")
+
+    # Chia Train/Val theo cấp độ Bệnh nhân (Patient-level split) để chống Data Leakage
+    rng = random.Random(seed)
+    shuffled_pids = list(patient_ids)
+    rng.shuffle(shuffled_pids)
+
+    if len(shuffled_pids) == 1:
+        val_patients = set()
+        train_patients = set(shuffled_pids)
+    else:
+        val_size = max(1, int(round(len(shuffled_pids) * val_split)))
+        val_patients = set(shuffled_pids[:val_size])
+        train_patients = set(shuffled_pids[val_size:])
+
+    rows = []
+    stats = {
+        "patients_total": len(patient_ids),
+        "patients_train": len(train_patients),
+        "patients_val": len(val_patients),
+        "dropped_no_lung": 0,
+        "dropped_small_tumor": 0,
+        "dropped_neg_sampled": 0,
+    }
+
+    for pid in patient_ids:
+        p_dir = cache_dir / pid
+        _, msk, meta = load_cached(p_dir, mmap=True)
+        num_slices = int(msk.shape[0])
+
+        lung_p = lung_cache_path(p_dir)
+        has_lung = lung_p.exists() and (meta.get("lung_ok", True) is not False)
+        lung = np.load(lung_p, mmap_mode="r") if has_lung else None
+
+        # Tính diện tích khối u (mm^2) trên từng lát cắt Z (1 pixel ở lưới 1mm = 1 mm^2)
+        msk_arr = np.asarray(msk)
+        tumor_areas = (msk_arr > 0).reshape(num_slices, -1).sum(axis=1).astype(np.float32)
+
+        if lung is not None and require_lung:
+            lung_arr = np.asarray(lung)
+            lung_pixels = (lung_arr > 0).reshape(num_slices, -1).sum(axis=1)
+        else:
+            lung_pixels = np.full(num_slices, 1, dtype=np.int64)
+
+        pos_slices = []
+        neg_candidates = []
+
+        for z in range(num_slices):
+            area = float(tumor_areas[z])
+            has_l = int(lung_pixels[z]) > 0
+
+            if area > 0.0:
+                if area < tumor_size_low_lim:
+                    stats["dropped_small_tumor"] += 1
+                    continue
+                pos_slices.append((z, area))
+            else:
+                if not has_l:
+                    stats["dropped_no_lung"] += 1
+                    continue
+                neg_candidates.append((z, 0.0))
+
+        # Cân bằng lát cắt âm tính (Negative Sampling) theo ZERO_SL_RATIO
+        if len(pos_slices) > 0:
+            num_neg_keep = max(1, int(round(len(pos_slices) * zero_sl_ratio))) if zero_sl_ratio > 0 else 0
+        else:
+            num_neg_keep = 1 if len(neg_candidates) > 0 else 0
+
+        if len(neg_candidates) > num_neg_keep:
+            kept_neg = sorted(rng.sample(neg_candidates, num_neg_keep), key=lambda x: x[0])
+            stats["dropped_neg_sampled"] += len(neg_candidates) - num_neg_keep
+        else:
+            kept_neg = neg_candidates
+
+        split = "val" if pid in val_patients else "train"
+        selected = [(z, 1, area) for z, area in pos_slices] + [(z, 0, area) for z, area in kept_neg]
+        selected.sort(key=lambda x: x[0])
+
+        for z, has_tumor, area in selected:
+            rows.append({
+                "patient_id": pid,
+                "z": int(z),
+                "num_slices": num_slices,
+                "has_tumor": int(has_tumor),
+                "tumor_area_mm2": round(float(area), 2),
+                "has_lung_mask": int(has_lung),
+                "split": split,
+            })
+
+    df = pd.DataFrame(rows)
+    out_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv_path, index=False)
+
+    pos_count = int((df["has_tumor"] == 1).sum()) if len(df) else 0
+    neg_count = int((df["has_tumor"] == 0).sum()) if len(df) else 0
+    train_count = int((df["split"] == "train").sum()) if len(df) else 0
+    val_count = int((df["split"] == "val").sum()) if len(df) else 0
+
+    print("=" * 50)
+    print("📊 THỐNG KÊ CHỈ MỤC DỮ LIỆU (OFFLINE BUILDER)")
+    print("=" * 50)
+    print(f"Tổng số bệnh nhân : {stats['patients_total']} ({stats['patients_train']} Train | {stats['patients_val']} Val)")
+    print(f"Tổng lát cắt giữ lại: {len(df)} ({train_count} Train | {val_count} Val)")
+    print(f"  + Dương tính (Có u >= {tumor_size_low_lim} mm²): {pos_count}")
+    print(f"  + Âm tính (Không u, có phổi)       : {neg_count}")
+    print("Các lát cắt đã lọc bỏ:")
+    print(f"  - Không chứa nhu mô phổi           : {stats['dropped_no_lung']}")
+    print(f"  - Khối u quá nhỏ (< {tumor_size_low_lim} mm²)     : {stats['dropped_small_tumor']}")
+    print(f"  - Âm tính dư thừa (Negative Sample): {stats['dropped_neg_sampled']}")
+    print(f"✅ Đã xuất bảng chỉ mục tại: {out_csv_path}")
+    return df, stats
+
+
+def _cmd_selftest(_):
+    print("Đang chạy kiểm thử tự động offline_builder.py...")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for i in range(1, 5):
+            p_dir = tmp / f"LIDC-IDRI-000{i}"
+            p_dir.mkdir(parents=True)
+            img = np.full((10, 100, 100), -800, dtype=np.int16)
+            msk = np.zeros((10, 100, 100), dtype=np.uint8)
+            lung = np.zeros((10, 100, 100), dtype=np.uint8)
+
+            lung[2:8, 10:90, 10:90] = 1        # Lát 0,1,8,9 không có phổi (4 lát/ca)
+            msk[3, 20:22, 20:25] = 1           # Lát 3: u 10 mm² (< 20 mm²) -> phải bị loại
+            msk[5, 30:35, 30:35] = 1           # Lát 5: u 25 mm² (>= 20 mm²) -> giữ lại
+            msk[6, 30:36, 30:36] = 1           # Lát 6: u 36 mm² (>= 20 mm²) -> giữ lại
+
+            np.save(p_dir / "image_1mm.npy", img)
+            np.save(p_dir / "mask_1mm.npy", msk)
+            np.save(p_dir / "lung_1mm.npy", lung)
+            with open(p_dir / "meta.json", "w", encoding="utf-8") as f:
+                json.dump({"orig_spacing_xyz": [0.7, 0.7, 1.5], "lung_ok": True}, f)
+
+        df, stats = build_dataset_index(tmp)
+        assert stats["dropped_no_lung"] == 16, f"Sai lọc phổi: {stats}"
+        assert stats["dropped_small_tumor"] == 4, f"Sai lọc u nhỏ: {stats}"
+        assert (df["has_tumor"] == 1).sum() == 8, "Phải giữ đúng 8 lát có u hợp lệ"
+        assert set(df["split"].unique()) == {"train", "val"}, "Phải có cả tập train và val"
+        print("✅ selftest offline_builder: OK!")
+    finally:
+        shutil.rmtree(tmp)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build", help="Tạo file slices.csv từ thư mục cache_1mm")
+    b.add_argument("--cache-dir", default=str(ROOT / "data" / "cache_1mm"))
+    b.add_argument("--out-csv", default=None)
+    b.add_argument("--no-require-lung", action="store_true", help="Không lọc bỏ lát thiếu phổi")
+    b.set_defaults(fn=lambda a: build_dataset_index(a.cache_dir, a.out_csv, require_lung=not a.no_require_lung))
+
+    s = sub.add_parser("selftest", help="Kiểm thử logic bằng dữ liệu giả lập")
+    s.set_defaults(fn=_cmd_selftest)
+
+    args = ap.parse_args()
+    args.fn(args)
+
+--------------------------------------------------------------------------------
+FILE: src\postprocess.py
+--------------------------------------------------------------------------------
+
+
+
+--------------------------------------------------------------------------------
+FILE: src\trainer.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+trainer.py - Bộ máy huấn luyện (Training Engine) cho dự án DuneAI 2.5D.
+
+Tính năng:
+  - Tự động phát hiện và chia tải Multi-GPU (nn.DataParallel) hoặc chạy 1 GPU / CPU.
+  - Hỗ trợ Mixed Precision (AMP float16) tăng tốc huấn luyện và tiết kiệm VRAM.
+  - Tích hợp trực tiếp window_hu_torch trên GPU nếu DataLoader trả về HU int16.
+  - Hiển thị đầy đủ Train/Val Loss, Dice, IoU, LR cùng thanh tiến trình batch và ước lượng thời gian (ETA).
+  - Cơ chế Resume toàn diện (khôi phục model, optimizer, scheduler, AMP scaler, best_val_dice,
+    early-stopping counter và nối tiếp history.csv) khi bị ngắt kết nối trên Colab/Kaggle hoặc khi train thêm epoch.
+  - Ghi file an toàn (Atomic Save qua .tmp -> os.replace) chống hỏng checkpoint khi sập nguồn/mất kết nối.
+  - Có sẵn 3 chế độ CLI:
+      1) selftest : Kiểm thử toàn trình bằng dữ liệu giả lập (bao gồm cả test Resume).
+      2) overfit  : Học thuộc lòng vài mẫu thật từ cache_1mm để nghiệm thu logic mạng.
+      3) train    : Huấn luyện chính thức toàn bộ dataset.
+
+Dùng:
+  python DuneAI_Remake/src/trainer.py selftest
+  python DuneAI_Remake/src/trainer.py overfit --cache-dir data/cache_1mm --epochs 15 --batch-size 2
+  python DuneAI_Remake/src/trainer.py train --cache-dir data/cache_1mm --epochs 50 --batch-size 8 --resume auto
+"""
+import argparse
+import json
+import os
+import random
+import shutil
+import sys
+import tempfile
+import time
+from contextlib import nullcontext
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
+THIS_DIR = Path(__file__).resolve().parent
+ROOT = THIS_DIR.parent
+for p in (str(THIS_DIR), str(ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import configs.config as cfg
+from dataset import LIDC25DDataset, create_dataloaders
+from models.dune_unet import DuneUNet
+from losses import DiceBCELoss, TverskyFocalLoss, compute_segmentation_metrics
+from medical_prep import window_hu_torch
+from offline_builder import build_dataset_index
+
+# Đọc linh hoạt các siêu tham số từ configs/config.py (có giá trị mặc định an toàn)
+DEFAULT_BATCH_SIZE = getattr(cfg, "BATCH_SIZE", 8)
+DEFAULT_EPOCHS = getattr(cfg, "EPOCHS", 50)
+DEFAULT_LR = getattr(cfg, "LR", getattr(cfg, "LEARNING_RATE", 1e-4))
+DEFAULT_SEED = getattr(cfg, "SEED", 42)
+
+
+def seed_everything(seed=DEFAULT_SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def format_duration(seconds):
+    """Định dạng thời gian (giây) sang chuỗi dễ đọc: 45.2s, 12m 30s, hoặc 02h 15m 10s."""
+    if seconds is None or not np.isfinite(seconds) or seconds < 0:
+        return "--:--"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    sec = int(round(seconds))
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m:02d}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h:02d}h {m:02d}m {s:02d}s"
+
+
+def _make_grad_scaler(enabled):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            pass
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _autocast_context(enabled):
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
+def _atomic_torch_save(obj, path):
+    """Lưu checkpoint qua file tạm rồi đổi tên để tránh hỏng file nếu Colab ngắt kết nối giữa chừng."""
+    path = Path(path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _atomic_csv_save(df, path):
+    """Ghi history.csv an toàn qua file tạm."""
+    path = Path(path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, path)
+
+
+class Trainer:
+    def __init__(
+        self,
+        model,
+        criterion,
+        optimizer,
+        scheduler=None,
+        device=None,
+        use_amp=True,
+        save_dir="checkpoints",
+        grad_clip=1.0,
+        show_progress=True,
+    ):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.is_cuda = self.device.type == "cuda"
+
+        # Cơ chế thích ứng tự động 1 GPU / Nhiều GPU
+        if self.is_cuda and torch.cuda.device_count() > 1 and not isinstance(model, nn.DataParallel):
+            print(f"🔥 Phát hiện {torch.cuda.device_count()} GPUs! Kích hoạt chế độ song song nn.DataParallel.")
+            model = nn.DataParallel(model)
+
+        self.model = model.to(self.device)
+        self.criterion = criterion.to(self.device)
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.use_amp = bool(use_amp and self.is_cuda)
+        self.scaler = _make_grad_scaler(self.use_amp)
+
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.grad_clip = grad_clip
+        self.show_progress = bool(show_progress)
+
+        # Trạng thái phục vụ huấn luyện và Resume
+        self.start_epoch = 1
+        self.best_val_dice = -1.0
+        self.no_improve = 0
+        self.history = []
+
+    def _unwrap_model(self):
+        """Bóc lớp bọc DataParallel để lưu state_dict chuẩn, nạp lại được trên mọi máy."""
+        return self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+
+    def _prepare_batch(self, batch):
+        images = batch["image"].to(self.device, non_blocking=self.is_cuda)
+        masks = batch["mask"].to(self.device, non_blocking=self.is_cuda)
+        # Nếu dataset trả về HU thô (int16), chuẩn hóa cửa sổ HU trực tiếp trên GPU
+        if images.dtype in (torch.int16, torch.int32, torch.int64):
+            images = window_hu_torch(images)
+        return images, masks
+
+    def run_epoch(self, loader, is_train=True, epoch=None, total_epochs=None):
+        self.model.train(is_train)
+        total_loss = 0.0
+        total_samples = 0
+        inter_sum = 0.0
+        pred_sum = 0.0
+        target_sum = 0.0
+
+        phase = "Train" if is_train else "Val  "
+        ep_prefix = f"Epoch [{epoch:02d}/{total_epochs:02d}] {phase}" if (epoch and total_epochs) else phase
+
+        use_bar = self.show_progress and (tqdm is not None) and sys.stderr.isatty()
+        iterator = tqdm(loader, desc=ep_prefix, leave=False, dynamic_ncols=True) if use_bar else loader
+
+        grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
+        with grad_ctx:
+            for batch in iterator:
+                images, masks = self._prepare_batch(batch)
+                bs = images.size(0)
+
+                if is_train:
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                with _autocast_context(self.use_amp):
+                    logits = self.model(images)
+                    loss = self.criterion(logits, masks)
+
+                if is_train:
+                    self.scaler.scale(loss).backward()
+                    if self.grad_clip is not None and self.grad_clip > 0:
+                        self.scaler.unscale_(self.optimizer)
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                total_loss += float(loss.item()) * bs
+                total_samples += bs
+
+                m = compute_segmentation_metrics(logits.detach(), masks)
+                inter_sum += m["intersection"]
+                pred_sum += m["pred_sum"]
+                target_sum += m["target_sum"]
+
+                if use_bar:
+                    running_loss = total_loss / max(1, total_samples)
+                    running_dice = (2.0 * inter_sum + 1e-6) / (pred_sum + target_sum + 1e-6)
+                    iterator.set_postfix(loss=f"{running_loss:.4f}", dice=f"{running_dice:.4f}")
+
+        eps = 1e-6
+        epoch_loss = total_loss / max(1, total_samples)
+        epoch_dice = (2.0 * inter_sum + eps) / (pred_sum + target_sum + eps)
+        union_sum = pred_sum + target_sum - inter_sum
+        epoch_iou = (inter_sum + eps) / (union_sum + eps)
+
+        return {"loss": epoch_loss, "dice": epoch_dice, "iou": epoch_iou}
+
+    def save_checkpoint(self, filename, epoch, val_metrics):
+        path = self.save_dir / filename
+        ckpt = {
+            "epoch": int(epoch),
+            "model_state_dict": self._unwrap_model().state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
+            "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+            "best_val_dice": float(self.best_val_dice),
+            "no_improve": int(self.no_improve),
+            "val_metrics": val_metrics,
+            "history": self.history,
+        }
+        _atomic_torch_save(ckpt, path)
+        return path
+
+    def load_checkpoint(self, checkpoint_path, resume_training=True):
+        """
+        Khôi phục trạng thái từ file checkpoint (.pth).
+        - resume_training=True : Khôi phục toàn bộ (model, optimizer, scheduler, scaler, epoch,
+                                 best_val_dice, no_improve, history) để train tiếp sau khi ngắt kết nối.
+        - resume_training=False: Chỉ nạp trọng số model_state_dict (dùng khi fine-tune / init_weights).
+        """
+        checkpoint_path = Path(checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Không tìm thấy file checkpoint: {checkpoint_path}")
+
+        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
+            self._unwrap_model().load_state_dict(ckpt)
+            print(f"📥 Đã nạp trọng số mô hình (raw state_dict) từ: {checkpoint_path}")
+            return 1
+
+        self._unwrap_model().load_state_dict(ckpt["model_state_dict"])
+        if not resume_training:
+            print(f"📥 Đã nạp trọng số khởi tạo (init_weights) từ: {checkpoint_path}")
+            return 1
+
+        if "optimizer_state_dict" in ckpt and ckpt["optimizer_state_dict"] is not None:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+        if self.scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
+            try:
+                self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            except Exception as e:
+                print(f"⚠️ Không nạp được scheduler_state_dict ({e}), giữ cấu hình scheduler hiện tại.")
+
+        if self.use_amp and ckpt.get("scaler_state_dict") is not None:
+            try:
+                self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+            except Exception as e:
+                print(f"⚠️ Không nạp được scaler_state_dict ({e}), khởi tạo scaler mới.")
+
+        last_epoch = int(ckpt.get("epoch", 0))
+        self.start_epoch = last_epoch + 1
+        self.best_val_dice = float(ckpt.get("best_val_dice", -1.0))
+        self.no_improve = int(ckpt.get("no_improve", 0))
+
+        # Khôi phục lịch sử huấn luyện từ checkpoint hoặc từ history.csv trên đĩa
+        if isinstance(ckpt.get("history"), list) and len(ckpt["history"]) > 0:
+            self.history = [r for r in ckpt["history"] if int(r.get("epoch", 0)) <= last_epoch]
+        elif (self.save_dir / "history.csv").exists():
+            try:
+                df_hist = pd.read_csv(self.save_dir / "history.csv")
+                df_hist = df_hist[df_hist["epoch"] <= last_epoch]
+                self.history = df_hist.to_dict(orient="records")
+            except Exception:
+                self.history = []
+
+        print(
+            f"🔄 RESUME THÀNH CÔNG từ '{checkpoint_path}' | "
+            f"Đã xong epoch {last_epoch} -> Tiếp tục từ epoch {self.start_epoch} | "
+            f"Best Val Dice hiện tại: {self.best_val_dice:.4f}"
+        )
+        return self.start_epoch
+
+    def fit(
+        self,
+        train_loader,
+        val_loader=None,
+        epochs=DEFAULT_EPOCHS,
+        early_stopping_patience=0,
+        resume_from=None,
+    ):
+        """
+        Vòng lặp huấn luyện chính.
+        Args:
+            resume_from: None, đường dẫn tới file .pth, hoặc 'auto' (tự tìm <save_dir>/last_model.pth).
+        """
+        if resume_from:
+            if str(resume_from).lower() == "auto":
+                candidate = self.save_dir / "last_model.pth"
+                if candidate.exists():
+                    self.load_checkpoint(candidate, resume_training=True)
+                else:
+                    print(f"ℹ️  Chế độ --resume auto: Chưa có '{candidate}', bắt đầu huấn luyện mới từ Epoch 1.")
+            else:
+                self.load_checkpoint(resume_from, resume_training=True)
+
+        # Nếu dùng CosineAnnealingLR và người dùng tăng tổng số epochs khi resume, đồng bộ lại T_max & LR
+        if self.scheduler is not None and isinstance(self.scheduler, torch.optim.lr_scheduler.CosineAnnealingLR):
+            if getattr(self.scheduler, "T_max", epochs) != epochs and epochs > 0:
+                self.scheduler.T_max = max(1, epochs)
+                if hasattr(self.scheduler, "_get_closed_form_lr"):
+                    for group, lr_val in zip(self.optimizer.param_groups, self.scheduler._get_closed_form_lr()):
+                        group["lr"] = lr_val
+                    self.scheduler._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
+        if self.start_epoch > epochs:
+            print(
+                f"✅ Mô hình đã hoàn thành {self.start_epoch - 1}/{epochs} epochs trong checkpoint trước đó. "
+                f"(Hãy tăng --epochs lớn hơn {self.start_epoch - 1} nếu muốn huấn luyện thêm)."
+            )
+            return self.history
+
+        n_batches_tr = len(train_loader)
+        n_batches_va = len(val_loader) if val_loader is not None else 0
+        print("=" * 95)
+        print(
+            f"🚀 BẮT ĐẦU HUẤN LUYỆN | Thiết bị: {self.device} | AMP: {self.use_amp} | "
+            f"Epochs: {self.start_epoch} -> {epochs} | Batch: {n_batches_tr} train, {n_batches_va} val"
+        )
+        print("=" * 95)
+
+        epoch_durations = []
+        fit_start_time = time.time()
+
+        for epoch in range(self.start_epoch, epochs + 1):
+            ep_t0 = time.time()
+
+            # 1. Pha Train
+            tr_t0 = time.time()
+            train_m = self.run_epoch(train_loader, is_train=True, epoch=epoch, total_epochs=epochs)
+            train_time = time.time() - tr_t0
+
+            # 2. Pha Validation
+            va_t0 = time.time()
+            if val_loader is not None:
+                val_m = self.run_epoch(val_loader, is_train=False, epoch=epoch, total_epochs=epochs)
+            else:
+                val_m = train_m
+            val_time = time.time() - va_t0
+
+            # 3. Cập nhật Learning Rate Scheduler
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_m["dice"])
+                else:
+                    self.scheduler.step()
+
+            lr = self.optimizer.param_groups[0]["lr"]
+            elapsed = time.time() - ep_t0
+            epoch_durations.append(elapsed)
+
+            # Ước lượng thời gian còn lại (ETA) dựa trên trung bình trượt 5 epoch gần nhất
+            recent_avg_sec = float(np.mean(epoch_durations[-5:]))
+            remaining_epochs = epochs - epoch
+            eta_sec = recent_avg_sec * remaining_epochs
+
+            row = {
+                "epoch": int(epoch),
+                "lr": float(lr),
+                "train_loss": round(train_m["loss"], 5),
+                "train_dice": round(train_m["dice"], 5),
+                "train_iou": round(train_m["iou"], 5),
+                "val_loss": round(val_m["loss"], 5),
+                "val_dice": round(val_m["dice"], 5),
+                "val_iou": round(val_m["iou"], 5),
+                "train_time_sec": round(train_time, 2),
+                "val_time_sec": round(val_time, 2),
+                "time_sec": round(elapsed, 2),
+                "eta_sec": round(eta_sec, 2),
+            }
+            # Ghi đè nếu cùng epoch (an toàn khi resume lại), sau đó lưu history.csv
+            self.history = [r for r in self.history if int(r.get("epoch", -1)) != epoch] + [row]
+            _atomic_csv_save(pd.DataFrame(self.history), self.save_dir / "history.csv")
+
+            is_best = val_m["dice"] > self.best_val_dice
+            if is_best:
+                self.best_val_dice = float(val_m["dice"])
+                self.no_improve = 0
+                self.save_checkpoint("best_model.pth", epoch, val_m)
+            else:
+                self.no_improve += 1
+
+            # Luôn lưu last_model.pth sau khi đã cập nhật best_val_dice & no_improve để Resume chính xác
+            self.save_checkpoint("last_model.pth", epoch, val_m)
+
+            badge = "⭐ [BEST]" if is_best else ""
+            print(
+                f"Epoch [{epoch:02d}/{epochs:02d}] | LR: {lr:.2e} | "
+                f"Train [Loss: {train_m['loss']:.4f}, Dice: {train_m['dice']:.4f}, IoU: {train_m['iou']:.4f}] | "
+                f"Val [Loss: {val_m['loss']:.4f}, Dice: {val_m['dice']:.4f}, IoU: {val_m['iou']:.4f}] | "
+                f"Time: {format_duration(elapsed)} (Tr:{train_time:.1f}s/Va:{val_time:.1f}s) | "
+                f"ETA: {format_duration(eta_sec)} {badge}"
+            )
+
+            if early_stopping_patience > 0 and self.no_improve >= early_stopping_patience:
+                print(
+                    f"⏹️ Dừng sớm (Early Stopping) tại epoch {epoch} do Val Dice không cải thiện "
+                    f"sau {early_stopping_patience} epochs liên tiếp."
+                )
+                break
+
+        total_fit_time = time.time() - fit_start_time
+        print("=" * 95)
+        print(
+            f"🎉 Hoàn tất! Best Val Dice: {self.best_val_dice:.4f} | "
+            f"Tổng thời gian chạy: {format_duration(total_fit_time)} | Lưu tại: {self.save_dir}"
+        )
+        return self.history
+
+
+# ======================================================================
+# CÁC CHẾ ĐỘ CHẠY CLI (TRAIN / OVERFIT / SELFTEST)
+# ======================================================================
+def _build_criterion(loss_name):
+    if loss_name == "tversky":
+        return TverskyFocalLoss()
+    return DiceBCELoss(bce_weight=0.5, dice_weight=0.5)
+
+
+def _cmd_train(a):
+    seed_everything(a.seed)
+    train_loader, val_loader = create_dataloaders(
+        cache_dir=a.cache_dir,
+        batch_size=a.batch_size,
+        num_workers=a.workers,
+        in_channels=3,
+        apply_lung=not a.no_lung_mask,
+        window_on_cpu=not a.gpu_window,
+        augment_train=not a.no_augment,
+    )
+    model = DuneUNet(in_channels=3, classes=1, features=a.features)
+    criterion = _build_criterion(a.loss)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=a.epochs, eta_min=1e-6)
+
+    trainer = Trainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        use_amp=not a.no_amp,
+        save_dir=a.save_dir,
+        show_progress=not a.no_progress,
+    )
+    trainer.fit(
+        train_loader,
+        val_loader,
+        epochs=a.epochs,
+        early_stopping_patience=a.patience,
+        resume_from=a.resume,
+    )
+
+
+def _cmd_overfit(a):
+    """
+    Chế độ Sanity Check: Lấy đúng N lát cắt CÓ KHỐI U từ cache_1mm và lặp lại việc học trên đó
+    để kiểm chứng mô hình có khả năng hội tụ (Loss giảm sâu, Dice tiến sát 1.0) hay không.
+    """
+    seed_everything(a.seed)
+    ds = LIDC25DDataset(
+        cache_dir=a.cache_dir,
+        split="train",
+        in_channels=3,
+        apply_lung=True,
+        window_on_cpu=not a.gpu_window,
+        augment=False,
+    )
+    pos_indices = ds.df.index[ds.df["has_tumor"] == 1].tolist()
+    chosen = pos_indices[: a.num_samples] if len(pos_indices) >= a.num_samples else list(range(min(len(ds), a.num_samples)))
+    subset = Subset(ds, chosen)
+    loader = DataLoader(subset, batch_size=min(a.batch_size, len(chosen)), shuffle=True, num_workers=0)
+
+    print(f"🔬 Chạy Overfit Sanity Check trên {len(chosen)} lát cắt có u...")
+    model = DuneUNet(in_channels=3, classes=1, features=a.features)
+    criterion = DiceBCELoss(bce_weight=0.5, dice_weight=0.5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-5)
+
+    trainer = Trainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=None,
+        use_amp=not a.no_amp,
+        save_dir=a.save_dir,
+        show_progress=not a.no_progress,
+    )
+    trainer.fit(loader, val_loader=loader, epochs=a.epochs, resume_from=a.resume)
+
+
+def _cmd_selftest(_):
+    print("Đang chạy kiểm thử tích hợp toàn trình trainer.py (Synthetic End-to-End + Resume)...")
+    seed_everything(42)
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for i in range(1, 5):
+            p_dir = tmp / f"LIDC-IDRI-000{i}"
+            p_dir.mkdir(parents=True)
+            img = np.full((8, 128, 128), -800, dtype=np.int16)
+            msk = np.zeros((8, 128, 128), dtype=np.uint8)
+            lung = np.ones((8, 128, 128), dtype=np.uint8)
+            img[3:6, 48:80, 48:80] = 50
+            msk[3:6, 48:80, 48:80] = 1
+
+            np.save(p_dir / "image_1mm.npy", img)
+            np.save(p_dir / "mask_1mm.npy", msk)
+            np.save(p_dir / "lung_1mm.npy", lung)
+            with open(p_dir / "meta.json", "w", encoding="utf-8") as f:
+                json.dump({"orig_spacing_xyz": [1.0, 1.0, 1.0], "lung_ok": True}, f)
+
+        build_dataset_index(tmp)
+        train_ds = LIDC25DDataset(tmp, split="train", image_size=128, window_on_cpu=False, augment=False)
+        val_ds = LIDC25DDataset(tmp, split="val", image_size=128, window_on_cpu=False, augment=False)
+        train_loader = DataLoader(train_ds, batch_size=4, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=4, shuffle=False)
+
+        ckpt_dir = tmp / "checkpoints"
+
+        # Pha 1: Huấn luyện 3 epochs đầu tiên (giả lập bị ngắt kết nối sau epoch 3)
+        model1 = DuneUNet(in_channels=3, classes=1, features=16)
+        criterion1 = DiceBCELoss()
+        optimizer1 = torch.optim.AdamW(model1.parameters(), lr=3e-3, weight_decay=1e-4)
+        scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer1, T_max=5, eta_min=1e-5)
+        trainer1 = Trainer(model1, criterion1, optimizer1, scheduler1, save_dir=ckpt_dir, show_progress=False)
+        hist1 = trainer1.fit(train_loader, val_loader, epochs=3)
+        assert len(hist1) == 3, f"Pha 1 phải có 3 epochs, nhận được {len(hist1)}"
+
+        # Pha 2: Khởi tạo mô hình mới hoàn toàn và Resume tự động ('auto') để chạy tiếp tới epoch 5
+        model2 = DuneUNet(in_channels=3, classes=1, features=16)
+        criterion2 = DiceBCELoss()
+        optimizer2 = torch.optim.AdamW(model2.parameters(), lr=3e-3, weight_decay=1e-4)
+        scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer2, T_max=5, eta_min=1e-5)
+        trainer2 = Trainer(model2, criterion2, optimizer2, scheduler2, save_dir=ckpt_dir, show_progress=False)
+        hist2 = trainer2.fit(train_loader, val_loader, epochs=5, resume_from="auto")
+
+        assert trainer2.start_epoch == 4, f"Phải bắt đầu tiếp từ epoch 4, nhưng start_epoch={trainer2.start_epoch}"
+        assert len(hist2) == 5, f"Tổng lịch sử sau resume phải đủ 5 epochs, nhận được {len(hist2)}"
+        df_csv = pd.read_csv(ckpt_dir / "history.csv")
+        assert list(df_csv["epoch"]) == [1, 2, 3, 4, 5], f"Cột epoch trong history.csv bị sai: {list(df_csv['epoch'])}"
+        assert hist2[-1]["train_loss"] < hist2[0]["train_loss"], "Train Loss phải giảm!"
+        assert hist2[-1]["val_loss"] < hist2[0]["val_loss"], "Val Loss phải giảm!"
+        assert hist2[-1]["train_dice"] > 0.80, f"Train Dice quá thấp: {hist2[-1]['train_dice']}"
+        assert (ckpt_dir / "best_model.pth").exists(), "Thiếu file best_model.pth"
+        assert (ckpt_dir / "last_model.pth").exists(), "Thiếu file last_model.pth"
+        print("✅ selftest trainer.py (bao gồm Resume tự động): OK!")
+    finally:
+        shutil.rmtree(tmp)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    # 1. Chế độ selftest
+    s = sub.add_parser("selftest", help="Kiểm thử tự động toàn bộ luồng huấn luyện & resume")
+    s.set_defaults(fn=_cmd_selftest)
+
+    # 2. Chế độ overfit (Sanity check trên vài mẫu thật)
+    o = sub.add_parser("overfit", help="Train thử trên vài lát cắt có u để kiểm tra hội tụ")
+    o.add_argument("--cache-dir", default="data/cache_1mm")
+    o.add_argument("--save-dir", default="checkpoints/overfit_test")
+    o.add_argument("--num-samples", type=int, default=4, help="Số lát cắt dùng để overfit")
+    o.add_argument("--batch-size", type=int, default=2)
+    o.add_argument("--epochs", type=int, default=15)
+    o.add_argument("--lr", type=float, default=1e-3)
+    o.add_argument("--features", type=int, default=32, help="Số filter cơ sở của DuneUNet (32 nhẹ hơn, 64 chuẩn)")
+    o.add_argument("--resume", default=None, help="Đường dẫn file .pth hoặc 'auto' để tự resume từ last_model.pth")
+    o.add_argument("--gpu-window", action="store_true", help="Chạy window_hu_torch trên GPU")
+    o.add_argument("--no-amp", action="store_true")
+    o.add_argument("--no-progress", action="store_true", help="Tắt thanh tiến trình tqdm từng batch")
+    o.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    o.set_defaults(fn=_cmd_overfit)
+
+    # 3. Chế độ train chính thức
+    t = sub.add_parser("train", help="Huấn luyện toàn bộ dataset")
+    t.add_argument("--cache-dir", default="data/cache_1mm")
+    t.add_argument("--save-dir", default="checkpoints/dune_unet_25d")
+    t.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    t.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    t.add_argument("--lr", type=float, default=DEFAULT_LR)
+    t.add_argument("--weight-decay", type=float, default=1e-4)
+    t.add_argument("--features", type=int, default=64)
+    t.add_argument("--workers", type=int, default=2)
+    t.add_argument("--patience", type=int, default=10, help="Early stopping patience (0 = tắt)")
+    t.add_argument("--loss", choices=["dice_bce", "tversky"], default="dice_bce")
+    t.add_argument("--resume", default=None, help="Đường dẫn file .pth hoặc 'auto' để tự resume từ last_model.pth")
+    t.add_argument("--gpu-window", action="store_true", help="Chuyển int16 lên GPU rồi gọi window_hu_torch")
+    t.add_argument("--no-lung-mask", action="store_true")
+    t.add_argument("--no-augment", action="store_true")
+    t.add_argument("--no-amp", action="store_true")
+    t.add_argument("--no-progress", action="store_true", help="Tắt thanh tiến trình tqdm từng batch")
+    t.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    t.set_defaults(fn=_cmd_train)
+
+    args = ap.parse_args()
+    args.fn(args)
+
+--------------------------------------------------------------------------------
+FILE: test_viewer.py
+--------------------------------------------------------------------------------
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider, CheckButtons
+import numpy as np
+import sys
+from pathlib import Path
+
+# Nạp các hàm từ src.medical_prep
+sys.path.append(str(Path(__file__).resolve().parent))
+from src.medical_prep import (load_nrrd, resize_and_pad_3d, clip_and_window_hu,
+                              extract_lungs_mask, lung_keep_mask, apply_lung_mask)
+
+# Thứ tự đúng với pipeline của tác giả: resize + pad trên HU thô, rồi mới kẹp cửa sổ.
+STAGE_RAW    = "1. Ảnh Thô Nguyên Bản"
+STAGE_RESIZE = "2. Resize 1mm + Pad (HU)"
+STAGE_HU     = "3. Kẹp Cửa Sổ (HU)"
+STAGE_LUNG   = "4. Tách Phổi + Cửa Sổ (chậm)"
+STAGES = [STAGE_RAW, STAGE_RESIZE, STAGE_HU, STAGE_LUNG]
+MASK_LABEL = "Hiện mask nốt"
+
+
+class LazyViewer:
+    """Mới mở chỉ có ảnh gốc. Mỗi bước chỉ được tính khi bạn tích chọn, và được cache lại."""
+
+    def __init__(self, image_path, mask_path=None, title="Tiền xử lý CT"):
+        print("Đang nạp ảnh CT thô...")
+        self.vol_raw, self.spacing = load_nrrd(image_path)
+        self.mask_raw = None
+        if mask_path and Path(mask_path).exists():
+            self.mask_raw, _ = load_nrrd(mask_path)
+        else:
+            print("(Không có mask.nrrd, bỏ qua lớp mặt nạ)")
+
+        self.title = title
+        self.vols = {STAGE_RAW: self.vol_raw}       # cache ảnh theo giai đoạn
+        self.masks = {STAGE_RAW: self.mask_raw}     # cache mask nốt theo giai đoạn
+        self.state = {s: (s == STAGE_RAW) for s in STAGES}   # mới đầu chỉ ảnh gốc
+        self.show_mask = False
+        self.n0 = self.vol_raw.shape[0]
+        self.idx = self.n0 // 2
+        self.axes, self.displays = [], []
+
+        self.fig = plt.figure(figsize=(18, 7))
+        self.fig.canvas.manager.set_window_title(title)
+
+        # Ô tích chọn giai đoạn (+ mask)
+        labels = STAGES + ([MASK_LABEL] if self.mask_raw is not None else [])
+        actives = [self.state[s] for s in STAGES] + ([False] if self.mask_raw is not None else [])
+        ax_chk = self.fig.add_axes([0.01, 0.36, 0.19, 0.28])
+        ax_chk.set_title("Chọn bước hiển thị", fontsize=10, fontweight="bold")
+        self.check = CheckButtons(ax_chk, labels, actives)
+        self.check.on_clicked(self.on_check)
+
+        # Thanh trượt Z
+        ax_sl = self.fig.add_axes([0.25, 0.04, 0.65, 0.03])
+        self.slider = Slider(ax_sl, "Lát cắt Z", 0, self.n0 - 1, valinit=self.idx, valstep=1)
+        self.slider.on_changed(self.on_slide)
+
+        self.redraw()
+
+    # ---------- tính toán lười (chỉ chạy khi được chọn) ----------
+    def get_vol(self, stage):
+        if stage in self.vols:
+            return self.vols[stage]
+        if stage == STAGE_RESIZE:
+            # resize trên HU thô; ảnh được pad bằng -1000 HU (mặc định của resize_and_pad_3d)
+            self.vols[stage] = resize_and_pad_3d(self.vol_raw, self.spacing)
+        elif stage == STAGE_HU:
+            self.vols[stage] = clip_and_window_hu(self.get_vol(STAGE_RESIZE))
+        elif stage == STAGE_LUNG:
+            # tách phổi trên HU thô ở lưới gốc, resize mask về 1 mm, che ảnh bằng -1000, rồi cửa sổ.
+            # Không hợp mask nốt vào (đó chỉ dành cho huấn luyện, dùng ở đây là rò rỉ nhãn).
+            lung = extract_lungs_mask(np.maximum(self.vol_raw, -1000))
+            if lung is None:
+                raise RuntimeError("không tìm thấy phổi")
+            lung_r = resize_and_pad_3d(lung, self.spacing, is_mask=True)
+            self.vols[stage] = clip_and_window_hu(apply_lung_mask(self.get_vol(STAGE_RESIZE), lung_r))
+        return self.vols[stage]
+
+    def get_mask(self, stage):
+        if self.mask_raw is None:
+            return None
+        if stage in self.masks:
+            return self.masks[stage]
+        # mọi bước sau bước 1 dùng chung mask nốt đã resize (nearest)
+        if STAGE_RESIZE not in self.masks:
+            self.masks[STAGE_RESIZE] = resize_and_pad_3d(self.mask_raw, self.spacing, is_mask=True)
+        self.masks[stage] = self.masks[STAGE_RESIZE]
+        return self.masks[stage]
+
+    # ---------- vẽ ----------
+    @staticmethod
+    def _slice(arr, idx, n0):
+        j = int(round(idx / max(n0 - 1, 1) * (arr.shape[0] - 1)))   # ánh xạ nếu số lát khác nhau
+        return arr[j]
+
+    def _status(self, text):
+        self.fig.suptitle(text, fontsize=13)
+        self.fig.canvas.draw()
+        plt.pause(0.01)
+
+    def redraw(self):
+        for ax in self.axes:
+            ax.remove()
+        self.axes, self.displays = [], []
+
+        active = [s for s in STAGES if self.state[s]]
+        n = len(active)
+        left, right, gap = 0.22, 0.99, 0.01
+        w = (right - left - gap * (n - 1)) / n
+
+        for i, stage in enumerate(active):
+            self._status(f"Đang xử lý: {stage} ...")
+            try:
+                vol = self.get_vol(stage)
+                mask = self.get_mask(stage) if self.show_mask else None
+            except Exception as e:
+                print(f"❌ Lỗi ở bước '{stage}': {e}")
+                self._deactivate(stage)
+                return self.redraw()
+
+            ax = self.fig.add_axes([left + i * (w + gap), 0.12, w, 0.76])
+            img = ax.imshow(self._slice(vol, self.idx, self.n0), cmap="gray")
+            m_disp = None
+            if mask is not None:
+                m = self._slice(mask, self.idx, self.n0)
+                m_disp = ax.imshow(np.ma.masked_where(m == 0, m), cmap="Reds",
+                                   alpha=0.4, vmin=0, vmax=1)
+            z, h, wd = vol.shape
+            ax.set_title(f"{stage}\n(Shape: {z}x{h}x{wd})", fontsize=10, fontweight="bold")
+            ax.axis("off")
+            self.axes.append(ax)
+            self.displays.append((vol, mask, img, m_disp))
+
+        self.update_frames()
+
+    def update_frames(self):
+        for vol, mask, img, m_disp in self.displays:
+            s = self._slice(vol, self.idx, self.n0)
+            img.set_data(s)
+            img.set_clim(vmin=s.min(), vmax=s.max())
+            if m_disp is not None:
+                m = self._slice(mask, self.idx, self.n0)
+                m_disp.set_data(np.ma.masked_where(m == 0, m))
+        self.fig.suptitle(f"{self.title} - Z: {self.idx}/{self.n0 - 1}", fontsize=13)
+        self.fig.canvas.draw_idle()
+
+    # ---------- sự kiện ----------
+    def _deactivate(self, stage):
+        self.state[stage] = False
+        i = STAGES.index(stage)
+        self.check.eventson = False       # bỏ tích mà không kích hoạt callback
+        self.check.set_active(i)
+        self.check.eventson = True
+
+    def on_check(self, label):
+        if label == MASK_LABEL:
+            self.show_mask = not self.show_mask
+        else:
+            self.state[label] = not self.state[label]
+            if not any(self.state.values()):      # luôn giữ ít nhất 1 ảnh
+                self.state[STAGE_RAW] = True
+                self.check.eventson = False
+                self.check.set_active(0)
+                self.check.eventson = True
+        self.redraw()
+
+    def on_slide(self, val):
+        self.idx = int(val)
+        self.update_frames()
+
+
+if __name__ == "__main__":
+    NRRD_DIR   = Path(r"D:\GG_1\COMPUTER SCIENCE\NAM4_HK1_(2026-2027)\CT208E\SOURCES\data\duneai_raw_nrrd")
+    PATIENT_ID = "LIDC-IDRI-0002"
+
+    viewer = LazyViewer(
+        NRRD_DIR / PATIENT_ID / "image.nrrd",
+        NRRD_DIR / PATIENT_ID / "mask.nrrd",
+        title=f"Tiền xử lý CT - {PATIENT_ID}",
+    )
+    plt.show()
+
+--------------------------------------------------------------------------------
+FILE: train_main.py
+--------------------------------------------------------------------------------
+
+# -*- coding: utf-8 -*-
+"""
+train_main.py - Điểm vào huấn luyện chính thức cho DuneAI 2.5D (baseline U-Net).
+
+Việc script này làm:
+  1. Đọc siêu tham số từ configs/config.py (có thể ghi đè bằng tham số dòng lệnh).
+  2. Kiểm tra cache_1mm và tự tạo slices.csv nếu chưa có (hoặc khi dùng --rebuild-index).
+  3. Dựng DataLoader (train có augment, val không), mô hình, loss, optimizer, scheduler.
+  4. Hỗ trợ khôi phục huấn luyện (--resume auto hoặc --resume <path>) khi bị ngắt kết nối trên Colab/Kaggle,
+     hoặc khi muốn tăng --epochs để train tiếp từ checkpoint trước đó.
+  5. Lưu config.json (để tái lập thí nghiệm) rồi gọi Trainer.fit.
+  6. Kết quả: best_model.pth, last_model.pth, history.csv, config.json trong --save-dir.
+
+Dùng:
+  python DuneAI_Remake/train_main.py selftest
+  python DuneAI_Remake/train_main.py train --cache-dir data/cache_1mm --epochs 50 --batch-size 8 --resume auto
+  python DuneAI_Remake/train_main.py train --cache-dir data/cache_1mm --epochs 2 --limit-train 16 --limit-val 8
+"""
+import argparse
+import json
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Subset
+
+ROOT = Path(__file__).resolve().parent
+for p in (str(ROOT), str(ROOT / "src")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import configs.config as cfg
+from dataset import LIDC25DDataset
+from models.dune_unet import DuneUNet
+from offline_builder import build_dataset_index
+from trainer import Trainer, _build_criterion, seed_everything
+
+DEFAULT_BATCH_SIZE = getattr(cfg, "BATCH_SIZE", 8)
+DEFAULT_EPOCHS = getattr(cfg, "EPOCHS", 50)
+DEFAULT_LR = getattr(cfg, "LR", getattr(cfg, "LEARNING_RATE", 1e-4))
+DEFAULT_SEED = getattr(cfg, "SEED", 42)
+DEFAULT_IMAGE_SIZE = getattr(cfg, "IMAGE_SIZE", 512)
+
+
+# ======================================================================
+# CÁC HÀM DỰNG THÀNH PHẦN
+# ======================================================================
+def ensure_index(cache_dir, rebuild=False):
+    """Đảm bảo có slices.csv. Trả về đường dẫn tới file."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy thư mục cache: {cache_dir.resolve()}\n"
+            f"Hãy chạy `python DuneAI_Remake/src/medical_prep.py build --extract-lungs` trước, "
+            f"hoặc kiểm tra lại --cache-dir (đường dẫn tương đối tính từ thư mục bạn đang đứng)."
+        )
+    csv_path = cache_dir / "slices.csv"
+    if rebuild or not csv_path.exists():
+        print(f"📋 {'Dựng lại' if rebuild else 'Chưa có'} slices.csv -> đang tạo chỉ mục...")
+        build_dataset_index(cache_dir)
+    return csv_path
+
+
+def summarize_index(csv_path):
+    """In thống kê chia tập để phát hiện sớm tình huống mất cân bằng hoặc thiếu val."""
+    df = pd.read_csv(csv_path)
+    print("-" * 65)
+    for split in ("train", "val"):
+        sub = df[df["split"] == split]
+        pos = int((sub["has_tumor"] == 1).sum())
+        print(
+            f"  {split:<5}: {len(sub):>6} lát | {sub['patient_id'].nunique():>4} bệnh nhân "
+            f"| có u: {pos} | âm tính: {len(sub) - pos}"
+        )
+    print("-" * 65)
+    return df
+
+
+def make_loaders(
+    cache_dir,
+    batch_size,
+    workers,
+    image_size,
+    apply_lung,
+    window_on_cpu,
+    augment,
+    limit_train=0,
+    limit_val=0,
+    seed=DEFAULT_SEED,
+):
+    """Dựng train/val loader. Nếu không có mẫu val thì trả val_loader=None (Trainer tự xử lý)."""
+    train_ds = LIDC25DDataset(
+        cache_dir, split="train", in_channels=3, image_size=image_size,
+        apply_lung=apply_lung, window_on_cpu=window_on_cpu, augment=augment,
+    )
+    try:
+        val_ds = LIDC25DDataset(
+            cache_dir, split="val", in_channels=3, image_size=image_size,
+            apply_lung=apply_lung, window_on_cpu=window_on_cpu, augment=False,
+        )
+    except ValueError:
+        print("⚠️  Không có mẫu nào thuộc tập val -> dùng chỉ số train thay cho val (chỉ nên xảy ra khi thử nghiệm).")
+        val_ds = None
+
+    rng = np.random.RandomState(seed)
+
+    def _limit(ds, n):
+        if ds is None or n <= 0 or n >= len(ds):
+            return ds
+        return Subset(ds, sorted(rng.choice(len(ds), size=n, replace=False).tolist()))
+
+    train_ds, val_ds = _limit(train_ds, limit_train), _limit(val_ds, limit_val)
+
+    pin = torch.cuda.is_available()
+    gen = torch.Generator().manual_seed(seed)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=workers,
+        pin_memory=pin, drop_last=len(train_ds) > batch_size, generator=gen,
+        persistent_workers=workers > 0,
+    )
+    val_loader = None
+    if val_ds is not None:
+        val_loader = DataLoader(
+            val_ds, batch_size=batch_size, shuffle=False, num_workers=workers,
+            pin_memory=pin, persistent_workers=workers > 0,
+        )
+    return train_loader, val_loader
+
+
+def make_scheduler(name, optimizer, epochs):
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs), eta_min=1e-6)
+    if name == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=3)
+    return None
+
+
+def load_init_weights(model, path):
+    """Nạp trọng số model (không nạp optimizer/epoch) để fine-tune sang kịch bản mới."""
+    ckpt = torch.load(path, map_location="cpu")
+    state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state)
+    print(f"📥 Đã nạp trọng số khởi tạo (init-weights) từ: {path}")
+
+
+# ======================================================================
+# LỆNH TRAIN
+# ======================================================================
+def run_train(a):
+    seed_everything(a.seed)
+    csv_path = ensure_index(a.cache_dir, rebuild=a.rebuild_index)
+    summarize_index(csv_path)
+
+    train_loader, val_loader = make_loaders(
+        cache_dir=a.cache_dir,
+        batch_size=a.batch_size,
+        workers=a.workers,
+        image_size=a.image_size,
+        apply_lung=not a.no_lung_mask,
+        window_on_cpu=not a.gpu_window,
+        augment=not a.no_augment,
+        limit_train=a.limit_train,
+        limit_val=a.limit_val,
+        seed=a.seed,
+    )
+
+    n_tr = len(train_loader.dataset)
+    n_va = len(val_loader.dataset) if val_loader is not None else 0
+    print(f"📦 Số lát dùng thực tế: train={n_tr} | val={n_va}" + (" (đã giới hạn bởi --limit-*)" if (a.limit_train or a.limit_val) else ""))
+
+    # Xác định chế độ resume (--auto-resume là viết tắt của --resume auto)
+    resume_target = "auto" if getattr(a, "auto_resume", False) and not a.resume else a.resume
+
+    model = DuneUNet(in_channels=3, classes=1, features=a.features)
+    if a.init_weights and not resume_target:
+        load_init_weights(model, a.init_weights)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    criterion = _build_criterion(a.loss)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
+    scheduler = make_scheduler(a.scheduler, optimizer, a.epochs)
+
+    trainer = Trainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        use_amp=not a.no_amp,
+        save_dir=a.save_dir,
+        grad_clip=a.grad_clip,
+        show_progress=not getattr(a, "no_progress", False),
+    )
+
+    save_dir = Path(a.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    cfg_file = save_dir / "config.json"
+    prev_started_at = None
+    if cfg_file.exists():
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                prev_started_at = json.load(f).get("started_at")
+        except Exception:
+            prev_started_at = None
+
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    run_info = {
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(a).items() if k != "fn"},
+        "device": str(trainer.device),
+        "amp": trainer.use_amp,
+        "num_params": n_params,
+        "train_samples": n_tr,
+        "val_samples": n_va,
+        "resume_target": str(resume_target) if resume_target else None,
+        "started_at": prev_started_at or now_str,
+        "last_updated_at": now_str,
+    }
+    with open(cfg_file, "w", encoding="utf-8") as f:
+        json.dump(run_info, f, ensure_ascii=False, indent=2)
+
+    print(
+        f"🧠 DuneUNet(features={a.features}) | {n_params:,} tham số | "
+        f"loss={a.loss} | lr={a.lr} | scheduler={a.scheduler} | batch={a.batch_size}"
+    )
+    history = trainer.fit(
+        train_loader,
+        val_loader,
+        epochs=a.epochs,
+        early_stopping_patience=a.patience,
+        resume_from=resume_target,
+    )
+    print(f"💾 Checkpoint tốt nhất: {save_dir / 'best_model.pth'}")
+    print(f"💾 Checkpoint mới nhất (để resume): {save_dir / 'last_model.pth'}")
+    return history
+
+
+# ======================================================================
+# SELFTEST: chạy đúng đường code của `train` trên dữ liệu giả lập
+# ======================================================================
+def _make_synthetic_cache(tmp, n_patients=4):
+    for i in range(1, n_patients + 1):
+        p_dir = tmp / f"LIDC-IDRI-{i:04d}"
+        p_dir.mkdir(parents=True)
+        img = np.full((8, 128, 128), -800, dtype=np.int16)
+        msk = np.zeros((8, 128, 128), dtype=np.uint8)
+        lung = np.ones((8, 128, 128), dtype=np.uint8)
+        img[3:6, 48:80, 48:80] = 50
+        msk[3:6, 48:80, 48:80] = 1
+        np.save(p_dir / "image_1mm.npy", img)
+        np.save(p_dir / "mask_1mm.npy", msk)
+        np.save(p_dir / "lung_1mm.npy", lung)
+        with open(p_dir / "meta.json", "w", encoding="utf-8") as f:
+            json.dump({"orig_spacing_xyz": [1.0, 1.0, 1.0], "lung_ok": True}, f)
+
+
+def _default_args(**over):
+    base = dict(
+        cache_dir="", save_dir="", batch_size=4, epochs=3, lr=3e-3, weight_decay=1e-4,
+        features=8, workers=0, patience=0, loss="dice_bce", scheduler="cosine",
+        grad_clip=1.0, image_size=128, limit_train=0, limit_val=0, init_weights=None,
+        resume=None, auto_resume=False, rebuild_index=False, gpu_window=False,
+        no_lung_mask=False, no_augment=True, no_amp=True, no_progress=True, seed=DEFAULT_SEED,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def run_selftest(_):
+    print("Đang chạy kiểm thử toàn trình train_main.py (dữ liệu giả lập + Resume)...")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        cache = tmp / "cache"
+        _make_synthetic_cache(cache)
+        save = tmp / "ckpt"
+
+        # 1) Chưa có slices.csv -> tự tạo; chạy 3 epochs đầu tiên (giả lập bị ngắt kết nối ở epoch 3)
+        assert not (cache / "slices.csv").exists()
+        a1 = _default_args(cache_dir=str(cache), save_dir=str(save), epochs=3, resume="auto")
+        hist1 = run_train(a1)
+        assert (cache / "slices.csv").exists(), "Không tự tạo slices.csv"
+        for fn in ("best_model.pth", "last_model.pth", "history.csv", "config.json"):
+            assert (save / fn).exists(), f"Thiếu {fn}"
+        assert len(hist1) == 3
+
+        # 2) Giả lập kết nối lại Colab: chạy tiếp lên 6 epochs với --resume auto
+        a_resume = _default_args(cache_dir=str(cache), save_dir=str(save), epochs=6, resume="auto")
+        hist = run_train(a_resume)
+        assert len(hist) == 6, f"Sau resume phải có đủ 6 epochs, nhận được {len(hist)}"
+        df_csv = pd.read_csv(save / "history.csv")
+        assert list(df_csv["epoch"]) == [1, 2, 3, 4, 5, 6], f"Thứ tự epoch sai: {list(df_csv['epoch'])}"
+        assert hist[-1]["train_loss"] < hist[0]["train_loss"], "Train loss phải giảm"
+        assert all(
+            np.isfinite(r["train_loss"]) and np.isfinite(r["val_loss"])
+            and "train_time_sec" in r and "eta_sec" in r
+            for r in hist
+        ), "Thiếu thông tin loss hoặc thời gian"
+
+        # 3) Gọi lại --resume auto khi đã đủ 6 epochs (phải thoát êm mà không lỗi)
+        hist_done = run_train(a_resume)
+        assert len(hist_done) == 6
+
+        # 4) Nạp lại trọng số từ best_model.pth bằng --init-weights rồi chạy kịch bản mới
+        save2 = tmp / "ckpt2"
+        a2 = _default_args(
+            cache_dir=str(cache), save_dir=str(save2), epochs=2, scheduler="plateau",
+            loss="tversky", init_weights=str(save / "best_model.pth"), limit_train=6,
+        )
+        hist2 = run_train(a2)
+        assert len(hist2) == 2 and all(np.isfinite(r["train_loss"]) for r in hist2)
+
+        # 5) Chế độ không có scheduler + dừng sớm
+        a3 = _default_args(
+            cache_dir=str(cache), save_dir=str(tmp / "ckpt3"), epochs=3,
+            scheduler="none", patience=1,
+        )
+        hist3 = run_train(a3)
+        assert 1 <= len(hist3) <= 3
+
+        print(
+            f"✅ selftest train_main.py: OK! "
+            f"(run 1+resume: train_loss {hist[0]['train_loss']:.4f} -> {hist[-1]['train_loss']:.4f}, "
+            f"train_dice cuối = {hist[-1]['train_dice']:.4f})"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ======================================================================
+# CLI
+# ======================================================================
+def build_parser():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("selftest", help="Kiểm thử toàn trình bằng dữ liệu giả lập (bao gồm cả Resume)")
+    s.set_defaults(fn=run_selftest)
+
+    t = sub.add_parser("train", help="Huấn luyện chính thức trên cache_1mm")
+    t.add_argument("--cache-dir", default="data/cache_1mm")
+    t.add_argument("--save-dir", default="checkpoints/dune_unet_25d")
+    t.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    t.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    t.add_argument("--lr", type=float, default=DEFAULT_LR)
+    t.add_argument("--weight-decay", type=float, default=1e-4)
+    t.add_argument("--grad-clip", type=float, default=1.0, help="0 = tắt")
+    t.add_argument("--features", type=int, default=64, help="Số filter cơ sở (32 nhẹ, 64 chuẩn)")
+    t.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE,
+                   help="Kích thước sau pad/crop ở giữa (KHÔNG resize; giữ 512 khi train thật)")
+    t.add_argument("--workers", type=int, default=2)
+    t.add_argument("--patience", type=int, default=10, help="Early stopping patience (0 = tắt)")
+    t.add_argument("--loss", choices=["dice_bce", "tversky"], default="dice_bce")
+    t.add_argument("--scheduler", choices=["cosine", "plateau", "none"], default="cosine")
+    t.add_argument("--resume", default=None,
+                   help="Đường dẫn tới last_model.pth hoặc truyền 'auto' để tự động khôi phục từ --save-dir")
+    t.add_argument("--auto-resume", action="store_true",
+                   help="Tự động resume nếu tìm thấy <save_dir>/last_model.pth (tương đương --resume auto)")
+    t.add_argument("--init-weights", default=None,
+                   help="Chỉ nạp trọng số model từ checkpoint (reset epoch về 1, không nạp optimizer)")
+    t.add_argument("--limit-train", type=int, default=0, help="Chỉ dùng N lát train ngẫu nhiên (0 = tất cả)")
+    t.add_argument("--limit-val", type=int, default=0, help="Chỉ dùng N lát val ngẫu nhiên (0 = tất cả)")
+    t.add_argument("--rebuild-index", action="store_true", help="Dựng lại slices.csv trước khi train")
+    t.add_argument("--gpu-window", action="store_true", help="Chuyển int16 lên GPU rồi gọi window_hu_torch")
+    t.add_argument("--no-lung-mask", action="store_true")
+    t.add_argument("--no-augment", action="store_true")
+    t.add_argument("--no-amp", action="store_true")
+    t.add_argument("--no-progress", action="store_true", help="Tắt thanh tiến trình tqdm từng batch")
+    t.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    t.set_defaults(fn=run_train)
+    return ap
+
+
+if __name__ == "__main__":
+    args = build_parser().parse_args()
+    args.fn(args)

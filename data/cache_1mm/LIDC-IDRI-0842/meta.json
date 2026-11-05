@@ -1,0 +1,26 @@
+{
+  "cache_version": 2,
+  "interp": "nearest",
+  "orig_shape_zyx": [
+    138,
+    512,
+    512
+  ],
+  "orig_spacing_xyz": [
+    0.722656,
+    0.722656,
+    2.5
+  ],
+  "shape_1mm_zyx": [
+    138,
+    370,
+    370
+  ],
+  "mask_voxels_orig": 46,
+  "mask_voxels_1mm": 22,
+  "mask_volume_mm3_orig": 60.05664484864,
+  "mask_volume_mm3_1mm": 55.0,
+  "lung_ok": true,
+  "lung_voxels_orig": 5989574,
+  "mask_in_lung_fraction": 1.0
+}

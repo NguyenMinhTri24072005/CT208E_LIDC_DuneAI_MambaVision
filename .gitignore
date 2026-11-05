@@ -29,8 +29,8 @@ data/raw/
 *.zip
 
 # Các bản ghi thống kê / biểu đồ sinh ra tự động (Tùy chọn)
-data/nodule_distribution_charts.png
-data/yolo_samples_preview.png
+# data/nodule_distribution_charts.png
+# data/yolo_samples_preview.png
 
 # (Lưu ý: Git vẫn sẽ track thư mục data/data_pipeline/ và các file .py bên trong)
 

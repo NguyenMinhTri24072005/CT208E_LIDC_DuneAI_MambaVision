@@ -1,90 +1,181 @@
-import SimpleITK as sitk
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Slider, CheckButtons
 import numpy as np
 import sys
+from pathlib import Path
 
-def load_nrrd(file_path):
-    """Hàm đọc file NRRD thành mảng Numpy"""
-    try:
-        sitk_img = sitk.ReadImage(file_path)
-        # SimpleITK trả về mảng (Z, Y, X), ta giữ nguyên
-        volume = sitk.GetArrayFromImage(sitk_img)
-        spacing = sitk_img.GetSpacing()
-        return volume, spacing
-    except Exception as e:
-        print(f"Lỗi khi đọc file {file_path}: {e}")
-        sys.exit(1)
+# Nạp các hàm từ src.medical_prep
+sys.path.append(str(Path(__file__).resolve().parent))
+from src.medical_prep import (load_nrrd, resize_and_pad_3d, clip_and_window_hu,
+                              extract_lungs_mask, lung_keep_mask, apply_lung_mask)
 
-def view_slices_interactive(volume, mask=None, title="CT Viewer"):
-    """Công cụ kéo thanh trượt để xem lát cắt 3D"""
-    num_slices = volume.shape[0]
-    
-    # Thiết lập giao diện đồ họa
-    fig, ax = plt.subplots(figsize=(8, 8))
-    plt.subplots_adjust(bottom=0.2) # Chừa chỗ cho thanh trượt
-    
-    # Hiển thị lát cắt đầu tiên (nằm giữa)
-    init_slice = num_slices // 2
-    img_display = ax.imshow(volume[init_slice], cmap='gray')
-    
-    # Nếu có truyền mặt nạ, vẽ đè lên với màu đỏ hơi trong suốt (alpha=0.4)
-    mask_display = None
-    if mask is not None:
-        # Tạo colormap đè (chỉ hiện màu đỏ ở pixel có giá trị > 0)
-        mask_display = ax.imshow(mask[init_slice], cmap='Reds', alpha=0.4, vmin=0, vmax=1)
-        # Ẩn mặt nạ ở những chỗ pixel = 0
-        mask_display.set_data(np.ma.masked_where(mask[init_slice] == 0, mask[init_slice]))
+# Thứ tự đúng với pipeline của tác giả: resize + pad trên HU thô, rồi mới kẹp cửa sổ.
+STAGE_RAW    = "1. Ảnh Thô Nguyên Bản"
+STAGE_RESIZE = "2. Resize 1mm + Pad (HU)"
+STAGE_HU     = "3. Kẹp Cửa Sổ (HU)"
+STAGE_LUNG   = "4. Tách Phổi + Cửa Sổ (chậm)"
+STAGES = [STAGE_RAW, STAGE_RESIZE, STAGE_HU, STAGE_LUNG]
+MASK_LABEL = "Hiện mask nốt"
 
-    ax.set_title(f"{title} - Lát cắt: {init_slice}/{num_slices-1}")
-    ax.axis('off')
 
-    # Tạo thanh trượt (Slider)
-    ax_slider = plt.axes([0.15, 0.05, 0.7, 0.03])
-    slider = Slider(
-        ax=ax_slider,
-        label='Z-Axis',
-        valmin=0,
-        valmax=num_slices - 1,
-        valinit=init_slice,
-        valstep=1
-    )
+class LazyViewer:
+    """Mới mở chỉ có ảnh gốc. Mỗi bước chỉ được tính khi bạn tích chọn, và được cache lại."""
 
-    # Hàm cập nhật hình ảnh khi kéo thanh trượt
-    def update(val):
-        idx = int(slider.val)
-        img_display.set_data(volume[idx])
-        
-        # Chỉnh dải màu (contrast) linh hoạt theo từng lát cắt
-        img_display.set_clim(vmin=volume[idx].min(), vmax=volume[idx].max())
-        
-        if mask is not None:
-            mask_display.set_data(np.ma.masked_where(mask[idx] == 0, mask[idx]))
-            
-        ax.set_title(f"{title} - Lát cắt: {idx}/{num_slices-1}")
-        fig.canvas.draw_idle()
+    def __init__(self, image_path, mask_path=None, title="Tiền xử lý CT"):
+        print("Đang nạp ảnh CT thô...")
+        self.vol_raw, self.spacing = load_nrrd(image_path)
+        self.mask_raw = None
+        if mask_path and Path(mask_path).exists():
+            self.mask_raw, _ = load_nrrd(mask_path)
+        else:
+            print("(Không có mask.nrrd, bỏ qua lớp mặt nạ)")
 
-    slider.on_changed(update)
-    plt.show()
+        self.title = title
+        self.vols = {STAGE_RAW: self.vol_raw}       # cache ảnh theo giai đoạn
+        self.masks = {STAGE_RAW: self.mask_raw}     # cache mask nốt theo giai đoạn
+        self.state = {s: (s == STAGE_RAW) for s in STAGES}   # mới đầu chỉ ảnh gốc
+        self.show_mask = False
+        self.n0 = self.vol_raw.shape[0]
+        self.idx = self.n0 // 2
+        self.axes, self.displays = [], []
+
+        self.fig = plt.figure(figsize=(18, 7))
+        self.fig.canvas.manager.set_window_title(title)
+
+        # Ô tích chọn giai đoạn (+ mask)
+        labels = STAGES + ([MASK_LABEL] if self.mask_raw is not None else [])
+        actives = [self.state[s] for s in STAGES] + ([False] if self.mask_raw is not None else [])
+        ax_chk = self.fig.add_axes([0.01, 0.36, 0.19, 0.28])
+        ax_chk.set_title("Chọn bước hiển thị", fontsize=10, fontweight="bold")
+        self.check = CheckButtons(ax_chk, labels, actives)
+        self.check.on_clicked(self.on_check)
+
+        # Thanh trượt Z
+        ax_sl = self.fig.add_axes([0.25, 0.04, 0.65, 0.03])
+        self.slider = Slider(ax_sl, "Lát cắt Z", 0, self.n0 - 1, valinit=self.idx, valstep=1)
+        self.slider.on_changed(self.on_slide)
+
+        self.redraw()
+
+    # ---------- tính toán lười (chỉ chạy khi được chọn) ----------
+    def get_vol(self, stage):
+        if stage in self.vols:
+            return self.vols[stage]
+        if stage == STAGE_RESIZE:
+            # resize trên HU thô; ảnh được pad bằng -1000 HU (mặc định của resize_and_pad_3d)
+            self.vols[stage] = resize_and_pad_3d(self.vol_raw, self.spacing)
+        elif stage == STAGE_HU:
+            self.vols[stage] = clip_and_window_hu(self.get_vol(STAGE_RESIZE))
+        elif stage == STAGE_LUNG:
+            # tách phổi trên HU thô ở lưới gốc, resize mask về 1 mm, che ảnh bằng -1000, rồi cửa sổ.
+            # Không hợp mask nốt vào (đó chỉ dành cho huấn luyện, dùng ở đây là rò rỉ nhãn).
+            lung = extract_lungs_mask(np.maximum(self.vol_raw, -1000))
+            if lung is None:
+                raise RuntimeError("không tìm thấy phổi")
+            lung_r = resize_and_pad_3d(lung, self.spacing, is_mask=True)
+            self.vols[stage] = clip_and_window_hu(apply_lung_mask(self.get_vol(STAGE_RESIZE), lung_r))
+        return self.vols[stage]
+
+    def get_mask(self, stage):
+        if self.mask_raw is None:
+            return None
+        if stage in self.masks:
+            return self.masks[stage]
+        # mọi bước sau bước 1 dùng chung mask nốt đã resize (nearest)
+        if STAGE_RESIZE not in self.masks:
+            self.masks[STAGE_RESIZE] = resize_and_pad_3d(self.mask_raw, self.spacing, is_mask=True)
+        self.masks[stage] = self.masks[STAGE_RESIZE]
+        return self.masks[stage]
+
+    # ---------- vẽ ----------
+    @staticmethod
+    def _slice(arr, idx, n0):
+        j = int(round(idx / max(n0 - 1, 1) * (arr.shape[0] - 1)))   # ánh xạ nếu số lát khác nhau
+        return arr[j]
+
+    def _status(self, text):
+        self.fig.suptitle(text, fontsize=13)
+        self.fig.canvas.draw()
+        plt.pause(0.01)
+
+    def redraw(self):
+        for ax in self.axes:
+            ax.remove()
+        self.axes, self.displays = [], []
+
+        active = [s for s in STAGES if self.state[s]]
+        n = len(active)
+        left, right, gap = 0.22, 0.99, 0.01
+        w = (right - left - gap * (n - 1)) / n
+
+        for i, stage in enumerate(active):
+            self._status(f"Đang xử lý: {stage} ...")
+            try:
+                vol = self.get_vol(stage)
+                mask = self.get_mask(stage) if self.show_mask else None
+            except Exception as e:
+                print(f"❌ Lỗi ở bước '{stage}': {e}")
+                self._deactivate(stage)
+                return self.redraw()
+
+            ax = self.fig.add_axes([left + i * (w + gap), 0.12, w, 0.76])
+            img = ax.imshow(self._slice(vol, self.idx, self.n0), cmap="gray")
+            m_disp = None
+            if mask is not None:
+                m = self._slice(mask, self.idx, self.n0)
+                m_disp = ax.imshow(np.ma.masked_where(m == 0, m), cmap="Reds",
+                                   alpha=0.4, vmin=0, vmax=1)
+            z, h, wd = vol.shape
+            ax.set_title(f"{stage}\n(Shape: {z}x{h}x{wd})", fontsize=10, fontweight="bold")
+            ax.axis("off")
+            self.axes.append(ax)
+            self.displays.append((vol, mask, img, m_disp))
+
+        self.update_frames()
+
+    def update_frames(self):
+        for vol, mask, img, m_disp in self.displays:
+            s = self._slice(vol, self.idx, self.n0)
+            img.set_data(s)
+            img.set_clim(vmin=s.min(), vmax=s.max())
+            if m_disp is not None:
+                m = self._slice(mask, self.idx, self.n0)
+                m_disp.set_data(np.ma.masked_where(m == 0, m))
+        self.fig.suptitle(f"{self.title} - Z: {self.idx}/{self.n0 - 1}", fontsize=13)
+        self.fig.canvas.draw_idle()
+
+    # ---------- sự kiện ----------
+    def _deactivate(self, stage):
+        self.state[stage] = False
+        i = STAGES.index(stage)
+        self.check.eventson = False       # bỏ tích mà không kích hoạt callback
+        self.check.set_active(i)
+        self.check.eventson = True
+
+    def on_check(self, label):
+        if label == MASK_LABEL:
+            self.show_mask = not self.show_mask
+        else:
+            self.state[label] = not self.state[label]
+            if not any(self.state.values()):      # luôn giữ ít nhất 1 ảnh
+                self.state[STAGE_RAW] = True
+                self.check.eventson = False
+                self.check.set_active(0)
+                self.check.eventson = True
+        self.redraw()
+
+    def on_slide(self, val):
+        self.idx = int(val)
+        self.update_frames()
+
 
 if __name__ == "__main__":
-    # ==========================================
-    # CÁCH TEST: Thay đường dẫn tới file NRRD của bạn vào đây
-    # ==========================================
-    # Đảm bảo bạn đã tải 1 bệnh nhân LIDC-IDRI-0001 về máy cục bộ
-    IMAGE_PATH = r"D:\GG_1\COMPUTER SCIENCE\NAM4_HK1_(2026-2027)\CT208E\SOURCES\data\duneai_nrrd\LIDC-IDRI-0002\image.nrrd"
-    MASK_PATH = r"D:\GG_1\COMPUTER SCIENCE\NAM4_HK1_(2026-2027)\CT208E\SOURCES\data\duneai_nrrd\LIDC-IDRI-0002\mask.nrrd"
+    NRRD_DIR   = Path(r"D:\GG_1\COMPUTER SCIENCE\NAM4_HK1_(2026-2027)\CT208E\SOURCES\data\duneai_raw_nrrd")
+    PATIENT_ID = "LIDC-IDRI-0002"
 
-    print("Đang nạp dữ liệu CT...")
-    vol_img, spacing_img = load_nrrd(IMAGE_PATH)
-    print(f"Ảnh CT gốc: {vol_img.shape} | Spacing: {spacing_img}")
-    
-    # Nạp mặt nạ (Nếu có)
-    vol_mask, spacing_mask = load_nrrd(MASK_PATH)
-    
-    # HIỂN THỊ:
-    # 1. Nếu chỉ muốn xem ảnh trắng đen thô:
-    # view_slices_interactive(vol_img, title="Ảnh CT Thô (Chưa xử lý)")
-    
-    # 2. Nếu muốn xem ảnh kèm khối u đè lên (Bỏ comment dòng dưới):
-    view_slices_interactive(vol_img, mask=vol_mask, title="Ảnh CT kèm Khối U")
+    viewer = LazyViewer(
+        NRRD_DIR / PATIENT_ID / "image.nrrd",
+        NRRD_DIR / PATIENT_ID / "mask.nrrd",
+        title=f"Tiền xử lý CT - {PATIENT_ID}",
+    )
+    plt.show()
