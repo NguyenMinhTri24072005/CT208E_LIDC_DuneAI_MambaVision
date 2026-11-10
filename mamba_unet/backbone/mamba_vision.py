@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-mamba_unet/backbone/mamba_vision.py - Backbone MambaVision phục vụ phân đoạn khối u 2.5D.
+mamba_unet/backbone/mamba_vision.py - Backbone MambaVision chuẩn NVIDIA (NVlabs/MambaVision - CVPR 2024).
 
 Quy tắc bất biến:
+  - Đồng bộ 1-1 kiến trúc gốc từ NVlabs/MambaVision:
+    * Stem: PatchEmbed stride 4.
+    * Stage 1 & 2: ConvBlock (Depthwise Separable Conv).
+    * Stage 3 & 4: Block hybrid chứa 1 Mixer (MambaVisionMixer HOẶC WindowAttention) + Mlp(fc1, fc2).
+    * Tỷ lệ phân chia Stage 3: 4 Mamba + 4 Attention (công thức depths[i] // 2).
+    * Tỷ lệ phân chia Stage 4: 2 Mamba + 2 Attention.
+    * Downsample: nn.Conv2d stride 2 thuần túy (không norm bên trong).
   - Trích xuất 4 feature maps đa tỷ lệ [H/4, H/8, H/16, H/32] làm Skip Connections cho UNetDecoder.
-  - Sử dụng các lớp dự phòng và selective_scan_fn từ mamba_unet.fallbacks.
   - Tuyệt đối KHÔNG import từ unet_base hay common (R1, R2).
 """
 
@@ -31,43 +37,43 @@ from mamba_unet.fallbacks import (
 )
 
 
-def window_partition(x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, int, int]:
-    """Chia feature map thành các window không chồng lấp."""
+def window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
+    """
+    Chia feature map (B, C, H, W) thành các windows không chồng lấp.
+    Đầu vào H, W đã được đệm bảo đảm chia hết cho window_size.
+    Đầu ra: (B * num_windows, window_size * window_size, C)
+    """
     B, C, H, W = x.shape
-    pad_h = (window_size - H % window_size) % window_size
-    pad_w = (window_size - W % window_size) % window_size
-    if pad_h > 0 or pad_w > 0:
-        x = F.pad(x, (0, pad_w, 0, pad_h))
-    Hp, Wp = H + pad_h, W + pad_w
-    x = x.view(B, C, Hp // window_size, window_size, Wp // window_size, window_size)
+    x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)
     windows = x.permute(0, 2, 4, 3, 5, 1).contiguous().view(-1, window_size * window_size, C)
-    return windows, Hp, Wp
+    return windows
 
 
-def window_reverse(windows: torch.Tensor, window_size: int, H: int, W: int, C: int) -> torch.Tensor:
-    """Ghép các window trở lại thành feature map kích thước đầy đủ."""
+def window_reverse(windows: torch.Tensor, window_size: int, H: int, W: int) -> torch.Tensor:
+    """
+    Ghép các window (B * num_windows, window_size * window_size, C) trở lại thành (B, C, H, W).
+    """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, C)
-    x = x.permute(0, 5, 1, 3, 2, 4).contiguous().view(B, C, H, W)
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 5, 1, 3, 2, 4).contiguous().view(B, -1, H, W)
     return x
 
 
 class Downsample(nn.Module):
-    """Khối giảm chiều không gian (giảm nửa H và W, tăng gấp đôi số kênh)."""
+    """Khối giảm chiều không gian chuẩn NVIDIA: chỉ dùng conv strided 2, không norm bên trong."""
     def __init__(self, dim: int, keep_dim: bool = False):
         super().__init__()
         out_dim = dim if keep_dim else 2 * dim
         self.reduction = nn.Sequential(
             nn.Conv2d(dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),
         )
-        self.norm = LayerNorm2d(out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.reduction(x))
+        return self.reduction(x)
 
 
 class PatchEmbed(nn.Module):
-    """Khối biến đổi ảnh đầu vào ban đầu: giảm kích thước không gian xuống H/4, W/4."""
+    """Khối biến đổi ảnh đầu vào ban đầu chuẩn NVIDIA: giảm kích thước không gian xuống H/4, W/4."""
     def __init__(self, in_chans: int = 3, in_dim: int = 32, dim: int = 80):
         super().__init__()
         self.conv_down = nn.Sequential(
@@ -84,7 +90,7 @@ class PatchEmbed(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    """Khối tích chập sâu (Depthwise Separable Conv) cho Stage 1 & 2."""
+    """Khối tích chập sâu (Depthwise Separable Conv) cho Stage 1 & 2 chuẩn NVIDIA."""
     def __init__(self, dim: int, drop_path: float = 0.0, layer_scale: Optional[float] = None):
         super().__init__()
         self.conv1 = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
@@ -107,8 +113,36 @@ class ConvBlock(nn.Module):
         return input_x + self.drop_path(x)
 
 
+class Mlp(nn.Module):
+    """Khối Mlp chuẩn NVIDIA (tương thích timm), sử dụng fc1 và fc2."""
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        act_layer: Any = nn.GELU,
+        drop: float = 0.0,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop2 = nn.Dropout(drop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
 class MambaVisionMixer(nn.Module):
-    """Khối trộn đặc trưng không gian dựa trên 1D Selective Scan State Space Model."""
+    """Khối trộn đặc trưng không gian dựa trên 1D Selective Scan State Space Model chuẩn NVIDIA."""
     def __init__(
         self,
         d_model: int,
@@ -210,30 +244,42 @@ class MambaVisionMixer(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-Head Self-Attention với Relative Position Bias."""
+    """Multi-Head Self-Attention chuẩn NVIDIA MambaVision."""
     def __init__(
         self,
         dim: int,
         num_heads: int = 8,
         qkv_bias: bool = False,
-        qk_scale: Optional[float] = None,
+        qk_scale: bool = False,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
     ):
         super().__init__()
+        assert dim % num_heads == 0, f"dim ({dim}) phải chia hết cho num_heads ({num_heads})"
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim**-0.5
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        self.qk_norm = qk_scale
+        if self.qk_norm:
+            self.q_norm = nn.LayerNorm(self.head_dim)
+            self.k_norm = nn.LayerNorm(self.head_dim)
+        else:
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -246,14 +292,16 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
-    """Khối kết hợp MambaVisionMixer + Attention + MLP."""
+    """Khối hybrid chuẩn NVIDIA: Mỗi block chỉ chứa 1 Mixer (Mamba HOẶC Attention) + 1 MLP."""
     def __init__(
         self,
         dim: int,
         num_heads: int,
+        counter: int,
+        transformer_blocks: List[int],
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
-        qk_scale: Optional[float] = None,
+        qk_scale: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
@@ -261,59 +309,64 @@ class Block(nn.Module):
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.mixer = MambaVisionMixer(d_model=dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.attn = Attention(
-            dim=dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-        )
+        if counter in transformer_blocks:
+            self.mixer = Attention(
+                dim=dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+            )
+        else:
+            self.mixer = MambaVisionMixer(
+                d_model=dim,
+                d_state=8,
+                d_conv=3,
+                expand=1,
+            )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm3 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(drop),
-            nn.Linear(mlp_hidden_dim, dim),
-            nn.Dropout(drop),
-        )
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop)
+
+        use_layer_scale = layer_scale is not None and isinstance(layer_scale, (int, float))
+        self.g_1 = nn.Parameter(layer_scale * torch.ones(dim)) if use_layer_scale else 1.0
+        self.g_2 = nn.Parameter(layer_scale * torch.ones(dim)) if use_layer_scale else 1.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.drop_path(self.mixer(self.norm1(x)))
-        x = x + self.drop_path(self.attn(self.norm2(x)))
-        x = x + self.drop_path(self.mlp(self.norm3(x)))
+        x = x + self.drop_path(self.g_1 * self.mixer(self.norm1(x)))
+        x = x + self.drop_path(self.g_2 * self.mlp(self.norm2(x)))
         return x
 
 
 class MambaVisionLayer(nn.Module):
-    """Một tầng (Stage) của MambaVision."""
+    """Một Stage trong MambaVision chuẩn NVIDIA (hỗ trợ cả ConvStage và HybridStage)."""
     def __init__(
         self,
         dim: int,
         depth: int,
         num_heads: int,
         window_size: int,
+        conv: bool = False,
+        downsample: bool = True,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
-        qk_scale: Optional[float] = None,
+        qk_scale: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: Union[float, List[float]] = 0.0,
-        downsample: bool = True,
         layer_scale: Optional[float] = None,
-        is_transformer_block: bool = False,
+        transformer_blocks: Optional[List[int]] = None,
     ):
         super().__init__()
         self.dim = dim
         self.depth = depth
         self.window_size = window_size
-        self.transformer_block = is_transformer_block
+        self.conv = conv
+        transformer_blocks = transformer_blocks or []
 
-        if not self.transformer_block:
+        if self.conv:
             self.blocks = nn.ModuleList([
                 ConvBlock(
                     dim=dim,
@@ -327,28 +380,36 @@ class MambaVisionLayer(nn.Module):
                 Block(
                     dim=dim,
                     num_heads=num_heads,
+                    counter=j,
+                    transformer_blocks=transformer_blocks,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
                     qk_scale=qk_scale,
                     drop=drop,
                     attn_drop=attn_drop,
-                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                    drop_path=drop_path[j] if isinstance(drop_path, list) else drop_path,
                     layer_scale=layer_scale,
                 )
-                for i in range(depth)
+                for j in range(depth)
             ])
 
         self.downsample = Downsample(dim=dim) if downsample else None
 
     def forward(self, x: torch.Tensor, return_feature_before_downsample: bool = True):
         B, C, H, W = x.shape
+        if not self.conv:
+            pad_r = (self.window_size - W % self.window_size) % self.window_size
+            pad_b = (self.window_size - H % self.window_size) % self.window_size
+            if pad_r > 0 or pad_b > 0:
+                x = F.pad(x, (0, pad_r, 0, pad_b))
+            _, _, Hp, Wp = x.shape
 
-        if self.transformer_block:
-            windows, Hp, Wp = window_partition(x, self.window_size)
+            windows = window_partition(x, self.window_size)
             for blk in self.blocks:
                 windows = blk(windows)
-            x = window_reverse(windows, self.window_size, Hp, Wp, C)
-            if Hp > H or Wp > W:
+            x = window_reverse(windows, self.window_size, Hp, Wp)
+
+            if pad_r > 0 or pad_b > 0:
                 x = x[:, :, :H, :W].contiguous()
         else:
             for blk in self.blocks:
@@ -367,8 +428,8 @@ class MambaVisionLayer(nn.Module):
 
 class MambaVision(nn.Module):
     """
-    MambaVision Backbone cho phân đoạn ảnh y tế:
-      Forward trả về danh sách 4 multi-scale feature maps: [H/4, H/8, H/16, H/32].
+    MambaVision Backbone chuẩn NVIDIA phục vụ phân đoạn ảnh y tế:
+      Forward trích xuất danh sách 4 multi-scale feature maps: [H/4, H/8, H/16, H/32].
     """
     def __init__(
         self,
@@ -390,7 +451,7 @@ class MambaVision(nn.Module):
         self.in_dim = in_dim
         self.in_chans = in_chans
 
-        self.out_channels = [dim, dim * 2, dim * 4, dim * 8]
+        self.out_channels = [int(dim * 2**i) for i in range(self.num_levels)]
         self.patch_embed = PatchEmbed(in_chans=in_chans, in_dim=in_dim, dim=dim)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
@@ -398,20 +459,35 @@ class MambaVision(nn.Module):
         self.levels = nn.ModuleList()
         for i in range(self.num_levels):
             stage_dim = int(dim * 2**i)
-            is_transformer = i >= 2
+            conv = True if (i == 0 or i == 1) else False
+
+            # Công thức phân chia chuẩn của NVIDIA:
+            # Stage 3 (depth=8) -> t_blocks = [4, 5, 6, 7] (4 Mamba + 4 Attention)
+            # Stage 4 (depth=4) -> t_blocks = [2, 3]       (2 Mamba + 2 Attention)
+            t_blocks = (
+                list(range(depths[i] // 2 + 1, depths[i]))
+                if depths[i] % 2 != 0
+                else list(range(depths[i] // 2, depths[i]))
+            ) if not conv else []
+
             level = MambaVisionLayer(
                 dim=stage_dim,
                 depth=depths[i],
                 num_heads=num_heads[i],
                 window_size=window_size[i],
+                conv=conv,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
                 drop_path=dpr[sum(depths[:i]):sum(depths[:i + 1])],
                 downsample=(i < self.num_levels - 1),
                 layer_scale=layer_scale,
-                is_transformer_block=is_transformer,
+                transformer_blocks=t_blocks,
             )
             self.levels.append(level)
+
+        # Lớp BatchNorm2d chuẩn của NVIDIA ở cuối Stage 4 (khớp norm.weight/bias trong checkpoint)
+        self.num_features = int(dim * 2 ** (self.num_levels - 1))
+        self.norm = nn.BatchNorm2d(self.num_features)
 
         self.apply(self._init_weights)
 
@@ -537,18 +613,78 @@ def build_mambavision_backbone(
 
 def _selftest():
     print("🧪 Bắt đầu selftest mamba_unet.backbone.mamba_vision...")
-    model = mamba_vision_T(pretrained=False, in_chans=3)
-    model.eval()
 
-    dummy = torch.randn(2, 3, 64, 64)
-    with torch.no_grad():
-        feats = model(dummy)
+    # 1. Test khối PatchEmbed
+    pe = PatchEmbed(in_chans=3, in_dim=32, dim=80)
+    x = torch.randn(2, 3, 64, 64)
+    pe_out = pe(x)
+    assert pe_out.shape == (2, 80, 16, 16), f"Lỗi PatchEmbed: {pe_out.shape}"
+    print("  ✓ PatchEmbed PASS")
 
-    assert len(feats) == 4, f"Kỳ vọng 4 feature maps, nhận được {len(feats)}"
-    assert feats[0].shape == (2, 80, 16, 16), f"Lỗi Stage 1: {feats[0].shape}"
-    assert feats[1].shape == (2, 160, 8, 8), f"Lỗi Stage 2: {feats[1].shape}"
-    assert feats[2].shape == (2, 320, 4, 4), f"Lỗi Stage 3: {feats[2].shape}"
-    assert feats[3].shape == (2, 640, 2, 2), f"Lỗi Stage 4: {feats[3].shape}"
+    # 2. Test khối ConvBlock
+    cb = ConvBlock(dim=80)
+    cb_out = cb(pe_out)
+    assert cb_out.shape == pe_out.shape, f"Lỗi ConvBlock: {cb_out.shape}"
+    print("  ✓ ConvBlock PASS")
+
+    # 3. Test khối Downsample
+    ds = Downsample(dim=80)
+    ds_out = ds(cb_out)
+    assert ds_out.shape == (2, 160, 8, 8), f"Lỗi Downsample: {ds_out.shape}"
+    print("  ✓ Downsample PASS")
+
+    # 4. Test khối Mlp
+    mlp = Mlp(in_features=80, hidden_features=320)
+    tokens = torch.randn(2, 16, 80)
+    mlp_out = mlp(tokens)
+    assert mlp_out.shape == tokens.shape, f"Lỗi Mlp: {mlp_out.shape}"
+    print("  ✓ Mlp PASS")
+
+    # 5. Test khối Attention
+    attn = Attention(dim=80, num_heads=2)
+    attn_out = attn(tokens)
+    assert attn_out.shape == tokens.shape, f"Lỗi Attention: {attn_out.shape}"
+    print("  ✓ Attention PASS")
+
+    # 6. Test khối MambaVisionMixer
+    mixer = MambaVisionMixer(d_model=80)
+    mixer_out = mixer(tokens)
+    assert mixer_out.shape == tokens.shape, f"Lỗi MambaVisionMixer: {mixer_out.shape}"
+    print("  ✓ MambaVisionMixer PASS")
+
+    # 7. Test khối Block (Mamba Mixer và Attention Mixer)
+    blk_mamba = Block(dim=80, num_heads=2, counter=0, transformer_blocks=[2, 3])
+    assert isinstance(blk_mamba.mixer, MambaVisionMixer)
+    assert blk_mamba(tokens).shape == tokens.shape
+
+    blk_attn = Block(dim=80, num_heads=2, counter=2, transformer_blocks=[2, 3])
+    assert isinstance(blk_attn.mixer, Attention)
+    assert blk_attn(tokens).shape == tokens.shape
+    print("  ✓ Block (Mamba & Attention) PASS")
+
+    # 8. Test toàn bộ mô hình MambaVision-Tiny trên ảnh kích thước 64x64 và 128x128
+    for sz in [64, 128]:
+        model = mamba_vision_T(pretrained=False, in_chans=3)
+        model.eval()
+        dummy = torch.randn(2, 3, sz, sz)
+        with torch.no_grad():
+            feats = model(dummy)
+        assert len(feats) == 4, f"Kỳ vọng 4 feature maps, nhận {len(feats)}"
+        assert feats[0].shape == (2, 80, sz // 4, sz // 4), f"Lỗi Stage 1: {feats[0].shape}"
+        assert feats[1].shape == (2, 160, sz // 8, sz // 8), f"Lỗi Stage 2: {feats[1].shape}"
+        assert feats[2].shape == (2, 320, sz // 16, sz // 16), f"Lỗi Stage 3: {feats[2].shape}"
+        assert feats[3].shape == (2, 640, sz // 32, sz // 32), f"Lỗi Stage 4: {feats[3].shape}"
+        print(f"  ✓ MambaVision-Tiny forward (sz={sz}) PASS")
+
+    # 9. Test khởi tạo các biến thể khác
+    for variant_fn, name in [
+        (mamba_vision_T2, "Tiny2"),
+        (mamba_vision_S, "Small"),
+        (mamba_vision_B, "Base"),
+    ]:
+        m = variant_fn(pretrained=False, in_chans=3)
+        print(f"  ✓ Khởi tạo {name} PASS (out_channels: {m.out_channels})")
+
     print("✅ Selftest mamba_unet.backbone.mamba_vision hoàn tất thành công!")
 
 
