@@ -1,0 +1,22 @@
+{
+    "SeriesInstanceUID": "1.2.276.0.7230010.3.1.3.0.70026.1553357218.308610",
+    "StudyInstanceUID": "1.3.6.1.4.1.14519.5.2.1.6279.6001.339975625902908481435949410827",
+    "Modality": "SR",
+    "SeriesDate": "2019-03-23 00:00:00.0",
+    "SeriesDescription": "Nodule 5 - Annotation 1 evaluations",
+    "SeriesNumber": 5511,
+    "Collection": "LIDC-IDRI",
+    "PatientID": "LIDC-IDRI-1008",
+    "Manufacturer": "QIICR",
+    "ManufacturerModelName": "https://github.com/QIICR/dcmqi.git",
+    "SoftwareVersions": "f86b34f",
+    "ImageCount": 1,
+    "TimeStamp": "2020-03-06 12:55:23.0",
+    "LicenseName": "Creative Commons Attribution 3.0 Unported License",
+    "LicenseURI": "http://creativecommons.org/licenses/by/3.0/",
+    "CollectionURI": "https://doi.org/10.7937/TCIA.2018.h7umfurq",
+    "FileSize": 101446,
+    "DateReleased": "2020-03-06 12:55:23.0",
+    "StudyDate": "2000-01-01 00:00:00.0",
+    "ThirdPartyAnalysis": "yes"
+}

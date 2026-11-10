@@ -1,0 +1,389 @@
+{
+  "encoder.inc.double_conv.0.weight": [
+    64,
+    3,
+    3,
+    3
+  ],
+  "encoder.inc.double_conv.1.weight": [
+    64
+  ],
+  "encoder.inc.double_conv.1.bias": [
+    64
+  ],
+  "encoder.inc.double_conv.1.running_mean": [
+    64
+  ],
+  "encoder.inc.double_conv.1.running_var": [
+    64
+  ],
+  "encoder.inc.double_conv.1.num_batches_tracked": [],
+  "encoder.inc.double_conv.3.weight": [
+    64,
+    64,
+    3,
+    3
+  ],
+  "encoder.inc.double_conv.4.weight": [
+    64
+  ],
+  "encoder.inc.double_conv.4.bias": [
+    64
+  ],
+  "encoder.inc.double_conv.4.running_mean": [
+    64
+  ],
+  "encoder.inc.double_conv.4.running_var": [
+    64
+  ],
+  "encoder.inc.double_conv.4.num_batches_tracked": [],
+  "encoder.down1.maxpool_conv.1.double_conv.0.weight": [
+    128,
+    64,
+    3,
+    3
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.1.weight": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.1.bias": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.1.running_mean": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.1.running_var": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "encoder.down1.maxpool_conv.1.double_conv.3.weight": [
+    128,
+    128,
+    3,
+    3
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.4.weight": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.4.bias": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.4.running_mean": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.4.running_var": [
+    128
+  ],
+  "encoder.down1.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "encoder.down2.maxpool_conv.1.double_conv.0.weight": [
+    256,
+    128,
+    3,
+    3
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.1.weight": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.1.bias": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.1.running_mean": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.1.running_var": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "encoder.down2.maxpool_conv.1.double_conv.3.weight": [
+    256,
+    256,
+    3,
+    3
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.4.weight": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.4.bias": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.4.running_mean": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.4.running_var": [
+    256
+  ],
+  "encoder.down2.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "encoder.down3.maxpool_conv.1.double_conv.0.weight": [
+    512,
+    256,
+    3,
+    3
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.1.weight": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.1.bias": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.1.running_mean": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.1.running_var": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "encoder.down3.maxpool_conv.1.double_conv.3.weight": [
+    512,
+    512,
+    3,
+    3
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.4.weight": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.4.bias": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.4.running_mean": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.4.running_var": [
+    512
+  ],
+  "encoder.down3.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "encoder.down4.maxpool_conv.1.double_conv.0.weight": [
+    1024,
+    512,
+    3,
+    3
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.1.weight": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.1.bias": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.1.running_mean": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.1.running_var": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "encoder.down4.maxpool_conv.1.double_conv.3.weight": [
+    1024,
+    1024,
+    3,
+    3
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.4.weight": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.4.bias": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.4.running_mean": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.4.running_var": [
+    1024
+  ],
+  "encoder.down4.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "decoder.up1.up.weight": [
+    1024,
+    512,
+    2,
+    2
+  ],
+  "decoder.up1.up.bias": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.0.weight": [
+    512,
+    1024,
+    3,
+    3
+  ],
+  "decoder.up1.conv.double_conv.1.weight": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.1.bias": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.1.running_mean": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.1.running_var": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.1.num_batches_tracked": [],
+  "decoder.up1.conv.double_conv.3.weight": [
+    512,
+    512,
+    3,
+    3
+  ],
+  "decoder.up1.conv.double_conv.4.weight": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.4.bias": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.4.running_mean": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.4.running_var": [
+    512
+  ],
+  "decoder.up1.conv.double_conv.4.num_batches_tracked": [],
+  "decoder.up2.up.weight": [
+    512,
+    256,
+    2,
+    2
+  ],
+  "decoder.up2.up.bias": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.0.weight": [
+    256,
+    512,
+    3,
+    3
+  ],
+  "decoder.up2.conv.double_conv.1.weight": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.1.bias": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.1.running_mean": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.1.running_var": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.1.num_batches_tracked": [],
+  "decoder.up2.conv.double_conv.3.weight": [
+    256,
+    256,
+    3,
+    3
+  ],
+  "decoder.up2.conv.double_conv.4.weight": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.4.bias": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.4.running_mean": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.4.running_var": [
+    256
+  ],
+  "decoder.up2.conv.double_conv.4.num_batches_tracked": [],
+  "decoder.up3.up.weight": [
+    256,
+    128,
+    2,
+    2
+  ],
+  "decoder.up3.up.bias": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.0.weight": [
+    128,
+    256,
+    3,
+    3
+  ],
+  "decoder.up3.conv.double_conv.1.weight": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.1.bias": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.1.running_mean": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.1.running_var": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.1.num_batches_tracked": [],
+  "decoder.up3.conv.double_conv.3.weight": [
+    128,
+    128,
+    3,
+    3
+  ],
+  "decoder.up3.conv.double_conv.4.weight": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.4.bias": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.4.running_mean": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.4.running_var": [
+    128
+  ],
+  "decoder.up3.conv.double_conv.4.num_batches_tracked": [],
+  "decoder.up4.up.weight": [
+    128,
+    64,
+    2,
+    2
+  ],
+  "decoder.up4.up.bias": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.0.weight": [
+    64,
+    128,
+    3,
+    3
+  ],
+  "decoder.up4.conv.double_conv.1.weight": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.1.bias": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.1.running_mean": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.1.running_var": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.1.num_batches_tracked": [],
+  "decoder.up4.conv.double_conv.3.weight": [
+    64,
+    64,
+    3,
+    3
+  ],
+  "decoder.up4.conv.double_conv.4.weight": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.4.bias": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.4.running_mean": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.4.running_var": [
+    64
+  ],
+  "decoder.up4.conv.double_conv.4.num_batches_tracked": [],
+  "decoder.outc.conv.weight": [
+    1,
+    64,
+    1,
+    1
+  ],
+  "decoder.outc.conv.bias": [
+    1
+  ]
+}

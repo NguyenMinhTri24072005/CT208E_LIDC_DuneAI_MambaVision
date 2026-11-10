@@ -1,0 +1,76 @@
+# ==========================================
+# 1. HỆ ĐIỀU HÀNH & MÔI TRƯỜNG PYTHON
+# ==========================================
+# Bỏ qua các tệp rác của hệ điều hành Windows/Mac
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Bỏ qua môi trường ảo và bộ nhớ đệm Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# ==========================================
+# 2. DỮ LIỆU & DATASETS (DUNG LƯỢNG LỚN)
+# ==========================================
+# Bỏ qua toàn bộ các thư mục chứa tệp NRRD, ZIP và Cache mảng numpy
+data/cache_1mm/
+data/duneai_nrrd/
+data/duneai_nrrd_mini/
+data/KAGGLE_UPLOAD/
+data/processed/
+data/raw/
+*.nrrd
+*.zip
+*.npy
+*.npz
+*.tmp
+
+# Các bản ghi thống kê / biểu đồ sinh ra tự động (Tùy chọn)
+# data/nodule_distribution_charts.png
+# data/yolo_samples_preview.png
+
+# (Lưu ý: Git vẫn sẽ track thư mục data/data_pipeline/ và các file .py bên trong)
+
+# ==========================================
+# 3. KẾT QUẢ HUẤN LUYỆN (TRỌNG SỐ & DỰ ĐOÁN)
+# ==========================================
+# Bỏ qua thư mục lưu trọng số model và logs
+checkpoints/
+model/checkpoints/
+*.pth
+*.pth.tar
+*.pt
+*.hdf5
+!tests/golden/*.pth
+!tests/golden/*.pt
+
+# Bỏ qua thư mục chứa kết quả dự đoán dạng mảng
+model/predictions/
+*.npy
+*.npz
+
+# Bỏ qua thư mục logs của TensorBoard hoặc ứng dụng khác
+log_dir/
+logs/
+runs/
+wandb/
+*.log
+
+# ==========================================
+# 4. JUPYTER NOTEBOOK CACHE
+# ==========================================
+.ipynb_checkpoints/
+
+# ==========================================
+# 5. NGOẠI LỆ HOẶC RÁC LOCAL    
+# ==========================================
+# Bỏ qua các bản sao lưu cấu hình vô tình được tạo ra trên máy local
+model/configs/*(1)*
+model/configs/*copy*

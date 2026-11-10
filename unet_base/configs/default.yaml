@@ -1,0 +1,36 @@
+# -*- coding: utf-8 -*-
+# unet_base/configs/default.yaml - Cấu hình mặc định cho kiến trúc UNetBase
+
+model:
+  features: 64
+  activation: "relu"
+  classes: 1
+  in_channels: 3
+  use_conv_transpose: true
+  init_bias: -4.0
+
+data:
+  cache_dir: "data/cache_1mm"
+  image_size: 512
+  workers: 2
+  augment: true
+  lung_mask: true
+  gpu_window: false
+
+loss:
+  name: "dice_bce"
+  params:
+    bce_weight: 0.5
+    dice_weight: 0.5
+    smooth: 1.0
+    batch_dice: true
+
+training:
+  epochs: 50
+  batch_size: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  scheduler: "cosine"
+  grad_clip: 1.0
+  patience: 12
+  seed: 42

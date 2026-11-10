@@ -1,0 +1,389 @@
+{
+  "inc.double_conv.0.weight": [
+    64,
+    3,
+    3,
+    3
+  ],
+  "inc.double_conv.1.weight": [
+    64
+  ],
+  "inc.double_conv.1.bias": [
+    64
+  ],
+  "inc.double_conv.1.running_mean": [
+    64
+  ],
+  "inc.double_conv.1.running_var": [
+    64
+  ],
+  "inc.double_conv.1.num_batches_tracked": [],
+  "inc.double_conv.3.weight": [
+    64,
+    64,
+    3,
+    3
+  ],
+  "inc.double_conv.4.weight": [
+    64
+  ],
+  "inc.double_conv.4.bias": [
+    64
+  ],
+  "inc.double_conv.4.running_mean": [
+    64
+  ],
+  "inc.double_conv.4.running_var": [
+    64
+  ],
+  "inc.double_conv.4.num_batches_tracked": [],
+  "down1.maxpool_conv.1.double_conv.0.weight": [
+    128,
+    64,
+    3,
+    3
+  ],
+  "down1.maxpool_conv.1.double_conv.1.weight": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.1.bias": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.1.running_mean": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.1.running_var": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "down1.maxpool_conv.1.double_conv.3.weight": [
+    128,
+    128,
+    3,
+    3
+  ],
+  "down1.maxpool_conv.1.double_conv.4.weight": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.4.bias": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.4.running_mean": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.4.running_var": [
+    128
+  ],
+  "down1.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "down2.maxpool_conv.1.double_conv.0.weight": [
+    256,
+    128,
+    3,
+    3
+  ],
+  "down2.maxpool_conv.1.double_conv.1.weight": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.1.bias": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.1.running_mean": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.1.running_var": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "down2.maxpool_conv.1.double_conv.3.weight": [
+    256,
+    256,
+    3,
+    3
+  ],
+  "down2.maxpool_conv.1.double_conv.4.weight": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.4.bias": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.4.running_mean": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.4.running_var": [
+    256
+  ],
+  "down2.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "down3.maxpool_conv.1.double_conv.0.weight": [
+    512,
+    256,
+    3,
+    3
+  ],
+  "down3.maxpool_conv.1.double_conv.1.weight": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.1.bias": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.1.running_mean": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.1.running_var": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "down3.maxpool_conv.1.double_conv.3.weight": [
+    512,
+    512,
+    3,
+    3
+  ],
+  "down3.maxpool_conv.1.double_conv.4.weight": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.4.bias": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.4.running_mean": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.4.running_var": [
+    512
+  ],
+  "down3.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "down4.maxpool_conv.1.double_conv.0.weight": [
+    1024,
+    512,
+    3,
+    3
+  ],
+  "down4.maxpool_conv.1.double_conv.1.weight": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.1.bias": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.1.running_mean": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.1.running_var": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.1.num_batches_tracked": [],
+  "down4.maxpool_conv.1.double_conv.3.weight": [
+    1024,
+    1024,
+    3,
+    3
+  ],
+  "down4.maxpool_conv.1.double_conv.4.weight": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.4.bias": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.4.running_mean": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.4.running_var": [
+    1024
+  ],
+  "down4.maxpool_conv.1.double_conv.4.num_batches_tracked": [],
+  "up1.up.weight": [
+    1024,
+    512,
+    2,
+    2
+  ],
+  "up1.up.bias": [
+    512
+  ],
+  "up1.conv.double_conv.0.weight": [
+    512,
+    1024,
+    3,
+    3
+  ],
+  "up1.conv.double_conv.1.weight": [
+    512
+  ],
+  "up1.conv.double_conv.1.bias": [
+    512
+  ],
+  "up1.conv.double_conv.1.running_mean": [
+    512
+  ],
+  "up1.conv.double_conv.1.running_var": [
+    512
+  ],
+  "up1.conv.double_conv.1.num_batches_tracked": [],
+  "up1.conv.double_conv.3.weight": [
+    512,
+    512,
+    3,
+    3
+  ],
+  "up1.conv.double_conv.4.weight": [
+    512
+  ],
+  "up1.conv.double_conv.4.bias": [
+    512
+  ],
+  "up1.conv.double_conv.4.running_mean": [
+    512
+  ],
+  "up1.conv.double_conv.4.running_var": [
+    512
+  ],
+  "up1.conv.double_conv.4.num_batches_tracked": [],
+  "up2.up.weight": [
+    512,
+    256,
+    2,
+    2
+  ],
+  "up2.up.bias": [
+    256
+  ],
+  "up2.conv.double_conv.0.weight": [
+    256,
+    512,
+    3,
+    3
+  ],
+  "up2.conv.double_conv.1.weight": [
+    256
+  ],
+  "up2.conv.double_conv.1.bias": [
+    256
+  ],
+  "up2.conv.double_conv.1.running_mean": [
+    256
+  ],
+  "up2.conv.double_conv.1.running_var": [
+    256
+  ],
+  "up2.conv.double_conv.1.num_batches_tracked": [],
+  "up2.conv.double_conv.3.weight": [
+    256,
+    256,
+    3,
+    3
+  ],
+  "up2.conv.double_conv.4.weight": [
+    256
+  ],
+  "up2.conv.double_conv.4.bias": [
+    256
+  ],
+  "up2.conv.double_conv.4.running_mean": [
+    256
+  ],
+  "up2.conv.double_conv.4.running_var": [
+    256
+  ],
+  "up2.conv.double_conv.4.num_batches_tracked": [],
+  "up3.up.weight": [
+    256,
+    128,
+    2,
+    2
+  ],
+  "up3.up.bias": [
+    128
+  ],
+  "up3.conv.double_conv.0.weight": [
+    128,
+    256,
+    3,
+    3
+  ],
+  "up3.conv.double_conv.1.weight": [
+    128
+  ],
+  "up3.conv.double_conv.1.bias": [
+    128
+  ],
+  "up3.conv.double_conv.1.running_mean": [
+    128
+  ],
+  "up3.conv.double_conv.1.running_var": [
+    128
+  ],
+  "up3.conv.double_conv.1.num_batches_tracked": [],
+  "up3.conv.double_conv.3.weight": [
+    128,
+    128,
+    3,
+    3
+  ],
+  "up3.conv.double_conv.4.weight": [
+    128
+  ],
+  "up3.conv.double_conv.4.bias": [
+    128
+  ],
+  "up3.conv.double_conv.4.running_mean": [
+    128
+  ],
+  "up3.conv.double_conv.4.running_var": [
+    128
+  ],
+  "up3.conv.double_conv.4.num_batches_tracked": [],
+  "up4.up.weight": [
+    128,
+    64,
+    2,
+    2
+  ],
+  "up4.up.bias": [
+    64
+  ],
+  "up4.conv.double_conv.0.weight": [
+    64,
+    128,
+    3,
+    3
+  ],
+  "up4.conv.double_conv.1.weight": [
+    64
+  ],
+  "up4.conv.double_conv.1.bias": [
+    64
+  ],
+  "up4.conv.double_conv.1.running_mean": [
+    64
+  ],
+  "up4.conv.double_conv.1.running_var": [
+    64
+  ],
+  "up4.conv.double_conv.1.num_batches_tracked": [],
+  "up4.conv.double_conv.3.weight": [
+    64,
+    64,
+    3,
+    3
+  ],
+  "up4.conv.double_conv.4.weight": [
+    64
+  ],
+  "up4.conv.double_conv.4.bias": [
+    64
+  ],
+  "up4.conv.double_conv.4.running_mean": [
+    64
+  ],
+  "up4.conv.double_conv.4.running_var": [
+    64
+  ],
+  "up4.conv.double_conv.4.num_batches_tracked": [],
+  "outc.conv.weight": [
+    1,
+    64,
+    1,
+    1
+  ],
+  "outc.conv.bias": [
+    1
+  ]
+}
