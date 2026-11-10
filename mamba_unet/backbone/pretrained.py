@@ -76,10 +76,14 @@ def resolve_pretrained_cache(variant: str) -> Path:
 
     drive_root = Path("/content/drive/MyDrive")
     if drive_root.exists():
-        search_dirs.insert(1, drive_root / "pretrained_weights")
-        for cand_dir in drive_root.glob("**/pretrained_weights"):
+        explicit_drive_dirs = [
+            drive_root / "pretrained_weights",
+            drive_root / "COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/pretrained_weights",
+            drive_root / "GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/pretrained_weights",
+        ]
+        for cand_dir in explicit_drive_dirs:
             if cand_dir.is_dir() and cand_dir not in search_dirs:
-                search_dirs.insert(2, cand_dir)
+                search_dirs.append(cand_dir)
 
     for s_dir in search_dirs:
         for fname in filenames:
