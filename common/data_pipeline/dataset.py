@@ -197,6 +197,53 @@ def create_dataloaders(
     return train_loader, val_loader
 
 
+def build_dataloaders(
+    cache_dir,
+    batch_size=8,
+    num_workers=2,
+    in_channels=3,
+    use_gpu_window=False,
+    lung_mask=True,
+    augment=True,
+    limit_train=0,
+    limit_val=0,
+    rebuild_index=False,
+    seed=42,
+    **kwargs,
+):
+    from pathlib import Path
+    cache_path = Path(cache_dir).resolve()
+    if rebuild_index or not (cache_path / "slices.csv").exists():
+        build_dataset_index(cache_path)
+    train_ds = LIDC25DDataset(
+        cache_dir=cache_path,
+        split="train",
+        in_channels=in_channels,
+        apply_lung=lung_mask,
+        window_on_cpu=not use_gpu_window,
+        augment=augment,
+    )
+    val_ds = LIDC25DDataset(
+        cache_dir=cache_path,
+        split="val",
+        in_channels=in_channels,
+        apply_lung=lung_mask,
+        window_on_cpu=not use_gpu_window,
+        augment=False,
+    )
+    if limit_train and limit_train > 0:
+        train_ds.df = train_ds.df.iloc[:limit_train].reset_index(drop=True)
+    if limit_val and limit_val > 0:
+        val_ds.df = val_ds.df.iloc[:limit_val].reset_index(drop=True)
+    pin = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin
+    )
+    return train_loader, val_loader
+
 def _cmd_selftest(_):
     print("Đang chạy kiểm thử tự động dataset.py...")
     tmp = Path(tempfile.mkdtemp())
