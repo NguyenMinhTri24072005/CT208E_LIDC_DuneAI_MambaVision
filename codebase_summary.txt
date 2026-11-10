@@ -309,7 +309,8 @@ __pycache__/
 # ==========================================
 # 2. DỮ LIỆU & DATASETS (DUNG LƯỢNG LỚN)
 # ==========================================
-# Bỏ qua toàn bộ các thư mục chứa tệp NRRD và tệp ZIP
+# Bỏ qua toàn bộ các thư mục chứa tệp NRRD, ZIP và Cache mảng numpy
+data/cache_1mm/
 data/duneai_nrrd/
 data/duneai_nrrd_mini/
 data/KAGGLE_UPLOAD/
@@ -317,6 +318,9 @@ data/processed/
 data/raw/
 *.nrrd
 *.zip
+*.npy
+*.npz
+*.tmp
 
 # Các bản ghi thống kê / biểu đồ sinh ra tự động (Tùy chọn)
 # data/nodule_distribution_charts.png
@@ -1834,10 +1838,24 @@ def find_drive_zip(zip_arg: str, drive_root: Optional[str] = None) -> Path:
             "Hãy đảm bảo bạn đã chạy ô Mount Drive trước: from google.colab import drive; drive.mount('/content/drive')"
         )
 
+    # 1. Kiểm tra nhanh các đường dẫn quen thuộc (bao gồm cấu trúc mirror GG_1 từ máy cục bộ)
+    known_candidates = [
+        search_root / "MyDrive" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "cache_1mm.zip",
+        search_root / "MyDrive" / "GG_1" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "cache_1mm.zip",
+        search_root / "MyDrive" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "KAGGLE_UPLOAD" / "cache_1mm.zip",
+        search_root / "MyDrive" / "cache_1mm.zip",
+        search_root / "MyDrive" / "DuneAI" / "cache_1mm.zip",
+    ]
+    for cand in known_candidates:
+        if cand.exists():
+            print(f"🎯 Đã tìm thấy file zip tại đường dẫn quen thuộc: {cand}")
+            return cand
+
+    # 2. Quét sâu đến 10 cấp thư mục nếu chưa thấy ở các đường dẫn quen thuộc
     candidates = []
     for root, dirs, files in os.walk(search_root):
         depth = len(Path(root).relative_to(search_root).parts)
-        if depth > 4:
+        if depth > 10:
             dirs.clear()
             continue
         for f in files:
@@ -6199,12 +6217,36 @@ drive.mount('/content/drive')
 
 # --- [Cell 6 - Code] ---
 # 5. Chuẩn bị dữ liệu từ Google Drive vào SSD cục bộ (/content/data/cache_1mm)
-# Bạn có thể chỉnh sửa NUM_PATIENTS: 0 = giải nén toàn bộ, hoặc nhập số ca (vd: 50, 100)
+# Thư mục GG_1 trên máy tính được mirror trực tiếp vào Google Drive.
+# Mã sẽ tự động tìm kiếm file zip theo đúng cấu trúc mirror của bạn:
+import os
 from common.data_pipeline.runtime_data import run_colab
 
-# Đặt đường dẫn file zip trong Google Drive của bạn (sửa lại theo đúng đường dẫn của bạn)
-DRIVE_ZIP_PATH = '/content/drive/MyDrive/cache_1mm.zip'  # Hoặc '/content/drive/MyDrive/DuneAI/cache_1mm.zip'
-NUM_PATIENTS = 0  # 0: Toàn bộ dataset, >0: Chọn N bệnh nhân đầu tiên để test nhanh
+DRIVE_ZIP_CANDIDATES = [
+    # 1. Mirror trực tiếp thư mục GG_1 vào MyDrive:
+    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',
+    # 2. Mirror có thư mục cha GG_1 trong MyDrive:
+    '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',
+    # 3. File zip tại thư mục KAGGLE_UPLOAD:
+    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/KAGGLE_UPLOAD/cache_1mm.zip',
+    # 4. File zip đặt ngay tại gốc MyDrive:
+    '/content/drive/MyDrive/cache_1mm.zip',
+]
+
+DRIVE_ZIP_PATH = None
+for cand in DRIVE_ZIP_CANDIDATES:
+    if os.path.exists(cand):
+        DRIVE_ZIP_PATH = cand
+        print(f'🎯 Đã tìm thấy file zip: {DRIVE_ZIP_PATH}')
+        break
+
+if DRIVE_ZIP_PATH is None:
+    print('⚠️ Chưa thấy ở các đường dẫn cố định, sẽ tự động dò tìm sâu dưới /content/drive...')
+    DRIVE_ZIP_PATH = 'auto'
+
+# NUM_PATIENTS: 0 = giải nén toàn bộ 1010 ca (cần ~40-60GB SSD Colab),
+# hoặc chọn số lượng ca (vd: 50, 100, 200) để huấn luyện nhanh tránh tràn ổ đĩa Colab
+NUM_PATIENTS = 0
 
 cache_dir = run_colab(
     zip_path=DRIVE_ZIP_PATH,
@@ -6231,12 +6273,22 @@ print(f'✅ Dữ liệu sẵn sàng tại: {cache_dir}')
     --split val
 
 # --- [Cell 9 - Code] ---
-# 8. Sao lưu kết quả và checkpoint về Google Drive an toàn
-BACKUP_DIR = '/content/drive/MyDrive/DuneAI_Backups'
-!mkdir -p {BACKUP_DIR}
-!cp -ru unet_base/runs {BACKUP_DIR}/ 2>/dev/null || true
-!cp -ru checkpoints {BACKUP_DIR}/ 2>/dev/null || true
-print('✅ Đã sao lưu checkpoints và logs vào Google Drive!')
+# 8. Sao lưu kết quả và checkpoint về Google Drive (tự động đồng bộ về máy tính qua mirror GG_1)
+import os
+
+# Đường dẫn lưu checkpoint trực tiếp vào thư mục mirror GG_1 trên Drive để máy tính tự động đồng bộ về:
+MIRROR_SOURCES_DIR = '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'
+if not os.path.exists(MIRROR_SOURCES_DIR):
+    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'
+if not os.path.exists(MIRROR_SOURCES_DIR):
+    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/DuneAI_Backups'
+
+BACKUP_RUNS = os.path.join(MIRROR_SOURCES_DIR, 'unet_base/runs')
+BACKUP_CKPT = os.path.join(MIRROR_SOURCES_DIR, 'checkpoints')
+!mkdir -p '{BACKUP_RUNS}' '{BACKUP_CKPT}'
+!cp -ru unet_base/runs/* '{BACKUP_RUNS}/' 2>/dev/null || true
+!cp -ru checkpoints/* '{BACKUP_CKPT}/' 2>/dev/null || true
+print(f'✅ Đã sao lưu checkpoints và logs vào Google Drive tại: {MIRROR_SOURCES_DIR}')
 
 
 --------------------------------------------------------------------------------
@@ -9275,12 +9327,36 @@ drive.mount('/content/drive')
 
 # --- [Cell 7 - Code] ---
 # 5. Chuẩn bị dữ liệu từ Google Drive vào SSD cục bộ (/content/data/cache_1mm)
-# Bạn có thể chỉnh sửa NUM_PATIENTS: 0 = giải nén toàn bộ, hoặc nhập số ca (vd: 50, 100)
+# Thư mục GG_1 trên máy tính được mirror trực tiếp vào Google Drive.
+# Mã sẽ tự động tìm kiếm file zip theo đúng cấu trúc mirror của bạn:
+import os
 from common.data_pipeline.runtime_data import run_colab
 
-# Đặt đường dẫn file zip trong Google Drive của bạn (sửa lại theo đúng đường dẫn của bạn)
-DRIVE_ZIP_PATH = '/content/drive/MyDrive/cache_1mm.zip'  # Hoặc '/content/drive/MyDrive/DuneAI/cache_1mm.zip'
-NUM_PATIENTS = 0  # 0: Toàn bộ dataset, >0: Chọn N bệnh nhân đầu tiên để test nhanh
+DRIVE_ZIP_CANDIDATES = [
+    # 1. Mirror trực tiếp thư mục GG_1 vào MyDrive:
+    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',
+    # 2. Mirror có thư mục cha GG_1 trong MyDrive:
+    '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',
+    # 3. File zip tại thư mục KAGGLE_UPLOAD:
+    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/KAGGLE_UPLOAD/cache_1mm.zip',
+    # 4. File zip đặt ngay tại gốc MyDrive:
+    '/content/drive/MyDrive/cache_1mm.zip',
+]
+
+DRIVE_ZIP_PATH = None
+for cand in DRIVE_ZIP_CANDIDATES:
+    if os.path.exists(cand):
+        DRIVE_ZIP_PATH = cand
+        print(f'🎯 Đã tìm thấy file zip: {DRIVE_ZIP_PATH}')
+        break
+
+if DRIVE_ZIP_PATH is None:
+    print('⚠️ Chưa thấy ở các đường dẫn cố định, sẽ tự động dò tìm sâu dưới /content/drive...')
+    DRIVE_ZIP_PATH = 'auto'
+
+# NUM_PATIENTS: 0 = giải nén toàn bộ 1010 ca (cần ~40-60GB SSD Colab),
+# hoặc chọn số lượng ca (vd: 50, 100, 200) để huấn luyện nhanh tránh tràn ổ đĩa Colab
+NUM_PATIENTS = 0
 
 cache_dir = run_colab(
     zip_path=DRIVE_ZIP_PATH,
@@ -9310,12 +9386,22 @@ print(f'✅ Dữ liệu sẵn sàng tại: {cache_dir}')
     --split val
 
 # --- [Cell 10 - Code] ---
-# 8. Sao lưu kết quả và checkpoint về Google Drive an toàn
-BACKUP_DIR = '/content/drive/MyDrive/DuneAI_Backups'
-!mkdir -p {BACKUP_DIR}
-!cp -ru mamba_unet/runs {BACKUP_DIR}/ 2>/dev/null || true
-!cp -ru checkpoints {BACKUP_DIR}/ 2>/dev/null || true
-print('✅ Đã sao lưu checkpoints và logs vào Google Drive!')
+# 8. Sao lưu kết quả và checkpoint về Google Drive (tự động đồng bộ về máy tính qua mirror GG_1)
+import os
+
+# Đường dẫn lưu checkpoint trực tiếp vào thư mục mirror GG_1 trên Drive để máy tính tự động đồng bộ về:
+MIRROR_SOURCES_DIR = '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'
+if not os.path.exists(MIRROR_SOURCES_DIR):
+    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'
+if not os.path.exists(MIRROR_SOURCES_DIR):
+    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/DuneAI_Backups'
+
+BACKUP_RUNS = os.path.join(MIRROR_SOURCES_DIR, 'mamba_unet/runs')
+BACKUP_CKPT = os.path.join(MIRROR_SOURCES_DIR, 'checkpoints')
+!mkdir -p '{BACKUP_RUNS}' '{BACKUP_CKPT}'
+!cp -ru mamba_unet/runs/* '{BACKUP_RUNS}/' 2>/dev/null || true
+!cp -ru checkpoints/* '{BACKUP_CKPT}/' 2>/dev/null || true
+print(f'✅ Đã sao lưu checkpoints và logs vào Google Drive tại: {MIRROR_SOURCES_DIR}')
 
 
 --------------------------------------------------------------------------------
@@ -9854,11 +9940,32 @@ def make_colab_notebook(arch: str) -> Dict[str, Any]:
         _make_cell("code", "# 4. Kết nối với Google Drive\nfrom google.colab import drive\ndrive.mount('/content/drive')"),
         _make_cell("code", (
             "# 5. Chuẩn bị dữ liệu từ Google Drive vào SSD cục bộ (/content/data/cache_1mm)\n"
-            "# Bạn có thể chỉnh sửa NUM_PATIENTS: 0 = giải nén toàn bộ, hoặc nhập số ca (vd: 50, 100)\n"
+            "# Thư mục GG_1 trên máy tính được mirror trực tiếp vào Google Drive.\n"
+            "# Mã sẽ tự động tìm kiếm file zip theo đúng cấu trúc mirror của bạn:\n"
+            "import os\n"
             "from common.data_pipeline.runtime_data import run_colab\n\n"
-            "# Đặt đường dẫn file zip trong Google Drive của bạn (sửa lại theo đúng đường dẫn của bạn)\n"
-            "DRIVE_ZIP_PATH = '/content/drive/MyDrive/cache_1mm.zip'  # Hoặc '/content/drive/MyDrive/DuneAI/cache_1mm.zip'\n"
-            "NUM_PATIENTS = 0  # 0: Toàn bộ dataset, >0: Chọn N bệnh nhân đầu tiên để test nhanh\n\n"
+            "DRIVE_ZIP_CANDIDATES = [\n"
+            "    # 1. Mirror trực tiếp thư mục GG_1 vào MyDrive:\n"
+            "    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',\n"
+            "    # 2. Mirror có thư mục cha GG_1 trong MyDrive:\n"
+            "    '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/cache_1mm.zip',\n"
+            "    # 3. File zip tại thư mục KAGGLE_UPLOAD:\n"
+            "    '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/KAGGLE_UPLOAD/cache_1mm.zip',\n"
+            "    # 4. File zip đặt ngay tại gốc MyDrive:\n"
+            "    '/content/drive/MyDrive/cache_1mm.zip',\n"
+            "]\n\n"
+            "DRIVE_ZIP_PATH = None\n"
+            "for cand in DRIVE_ZIP_CANDIDATES:\n"
+            "    if os.path.exists(cand):\n"
+            "        DRIVE_ZIP_PATH = cand\n"
+            "        print(f'🎯 Đã tìm thấy file zip: {DRIVE_ZIP_PATH}')\n"
+            "        break\n\n"
+            "if DRIVE_ZIP_PATH is None:\n"
+            "    print('⚠️ Chưa thấy ở các đường dẫn cố định, sẽ tự động dò tìm sâu dưới /content/drive...')\n"
+            "    DRIVE_ZIP_PATH = 'auto'\n\n"
+            "# NUM_PATIENTS: 0 = giải nén toàn bộ 1010 ca (cần ~40-60GB SSD Colab),\n"
+            "# hoặc chọn số lượng ca (vd: 50, 100, 200) để huấn luyện nhanh tránh tràn ổ đĩa Colab\n"
+            "NUM_PATIENTS = 0\n\n"
             "cache_dir = run_colab(\n"
             "    zip_path=DRIVE_ZIP_PATH,\n"
             "    dest_dir='/content/data/cache_1mm',\n"
@@ -9869,12 +9976,20 @@ def make_colab_notebook(arch: str) -> Dict[str, Any]:
         _make_cell("code", f"# 6. Bắt đầu quá trình huấn luyện\n{train_cmd}"),
         _make_cell("code", f"# 7. Đánh giá 3D cấp độ bệnh nhân trên tập Validation\n{eval_cmd}"),
         _make_cell("code", (
-            "# 8. Sao lưu kết quả và checkpoint về Google Drive an toàn\n"
-            "BACKUP_DIR = '/content/drive/MyDrive/DuneAI_Backups'\n"
-            "!mkdir -p {BACKUP_DIR}\n"
-            f"!cp -ru {arch}/runs {{BACKUP_DIR}}/ 2>/dev/null || true\n"
-            "!cp -ru checkpoints {BACKUP_DIR}/ 2>/dev/null || true\n"
-            "print('✅ Đã sao lưu checkpoints và logs vào Google Drive!')"
+            "# 8. Sao lưu kết quả và checkpoint về Google Drive (tự động đồng bộ về máy tính qua mirror GG_1)\n"
+            "import os\n\n"
+            "# Đường dẫn lưu checkpoint trực tiếp vào thư mục mirror GG_1 trên Drive để máy tính tự động đồng bộ về:\n"
+            "MIRROR_SOURCES_DIR = '/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'\n"
+            "if not os.path.exists(MIRROR_SOURCES_DIR):\n"
+            "    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/GG_1/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES'\n"
+            "if not os.path.exists(MIRROR_SOURCES_DIR):\n"
+            "    MIRROR_SOURCES_DIR = '/content/drive/MyDrive/DuneAI_Backups'\n\n"
+            f"BACKUP_RUNS = os.path.join(MIRROR_SOURCES_DIR, '{arch}/runs')\n"
+            "BACKUP_CKPT = os.path.join(MIRROR_SOURCES_DIR, 'checkpoints')\n"
+            "!mkdir -p '{BACKUP_RUNS}' '{BACKUP_CKPT}'\n"
+            f"!cp -ru {arch}/runs/* '{{BACKUP_RUNS}}/' 2>/dev/null || true\n"
+            "!cp -ru checkpoints/* '{BACKUP_CKPT}/' 2>/dev/null || true\n"
+            "print(f'✅ Đã sao lưu checkpoints và logs vào Google Drive tại: {MIRROR_SOURCES_DIR}')"
         )),
     ])
     return _build_notebook(cells)

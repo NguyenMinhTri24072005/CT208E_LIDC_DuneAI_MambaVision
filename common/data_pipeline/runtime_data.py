@@ -172,10 +172,24 @@ def find_drive_zip(zip_arg: str, drive_root: Optional[str] = None) -> Path:
             "Hãy đảm bảo bạn đã chạy ô Mount Drive trước: from google.colab import drive; drive.mount('/content/drive')"
         )
 
+    # 1. Kiểm tra nhanh các đường dẫn quen thuộc (bao gồm cấu trúc mirror GG_1 từ máy cục bộ)
+    known_candidates = [
+        search_root / "MyDrive" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "cache_1mm.zip",
+        search_root / "MyDrive" / "GG_1" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "cache_1mm.zip",
+        search_root / "MyDrive" / "COMPUTER SCIENCE" / "NAM4_HK1_(2026-2027)" / "CT208E" / "SOURCES" / "data" / "KAGGLE_UPLOAD" / "cache_1mm.zip",
+        search_root / "MyDrive" / "cache_1mm.zip",
+        search_root / "MyDrive" / "DuneAI" / "cache_1mm.zip",
+    ]
+    for cand in known_candidates:
+        if cand.exists():
+            print(f"🎯 Đã tìm thấy file zip tại đường dẫn quen thuộc: {cand}")
+            return cand
+
+    # 2. Quét sâu đến 10 cấp thư mục nếu chưa thấy ở các đường dẫn quen thuộc
     candidates = []
     for root, dirs, files in os.walk(search_root):
         depth = len(Path(root).relative_to(search_root).parts)
-        if depth > 4:
+        if depth > 10:
             dirs.clear()
             continue
         for f in files:
