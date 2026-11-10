@@ -39,28 +39,48 @@
   "encoder.patch_embed.conv_down.4.num_batches_tracked": [],
   "encoder.levels.0.blocks.0.conv1.weight": [
     80,
-    1,
+    80,
     3,
     3
   ],
-  "encoder.levels.0.blocks.0.norm.weight": [
+  "encoder.levels.0.blocks.0.conv1.bias": [
     80
   ],
-  "encoder.levels.0.blocks.0.norm.bias": [
+  "encoder.levels.0.blocks.0.norm1.weight": [
     80
   ],
+  "encoder.levels.0.blocks.0.norm1.bias": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm1.running_mean": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm1.running_var": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm1.num_batches_tracked": [],
   "encoder.levels.0.blocks.0.conv2.weight": [
-    320,
     80,
-    1,
-    1
-  ],
-  "encoder.levels.0.blocks.0.conv3.weight": [
     80,
-    320,
-    1,
-    1
+    3,
+    3
   ],
+  "encoder.levels.0.blocks.0.conv2.bias": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm2.weight": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm2.bias": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm2.running_mean": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm2.running_var": [
+    80
+  ],
+  "encoder.levels.0.blocks.0.norm2.num_batches_tracked": [],
   "encoder.levels.0.downsample.reduction.0.weight": [
     160,
     80,
@@ -69,76 +89,136 @@
   ],
   "encoder.levels.1.blocks.0.conv1.weight": [
     160,
-    1,
+    160,
     3,
     3
   ],
-  "encoder.levels.1.blocks.0.norm.weight": [
+  "encoder.levels.1.blocks.0.conv1.bias": [
     160
   ],
-  "encoder.levels.1.blocks.0.norm.bias": [
+  "encoder.levels.1.blocks.0.norm1.weight": [
     160
   ],
+  "encoder.levels.1.blocks.0.norm1.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm1.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm1.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm1.num_batches_tracked": [],
   "encoder.levels.1.blocks.0.conv2.weight": [
-    640,
     160,
-    1,
-    1
-  ],
-  "encoder.levels.1.blocks.0.conv3.weight": [
     160,
-    640,
-    1,
-    1
+    3,
+    3
   ],
+  "encoder.levels.1.blocks.0.conv2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm2.weight": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm2.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm2.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.0.norm2.num_batches_tracked": [],
   "encoder.levels.1.blocks.1.conv1.weight": [
     160,
-    1,
+    160,
     3,
     3
   ],
-  "encoder.levels.1.blocks.1.norm.weight": [
+  "encoder.levels.1.blocks.1.conv1.bias": [
     160
   ],
-  "encoder.levels.1.blocks.1.norm.bias": [
+  "encoder.levels.1.blocks.1.norm1.weight": [
     160
   ],
+  "encoder.levels.1.blocks.1.norm1.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm1.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm1.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm1.num_batches_tracked": [],
   "encoder.levels.1.blocks.1.conv2.weight": [
-    640,
     160,
-    1,
-    1
-  ],
-  "encoder.levels.1.blocks.1.conv3.weight": [
     160,
-    640,
-    1,
-    1
+    3,
+    3
   ],
+  "encoder.levels.1.blocks.1.conv2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm2.weight": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm2.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm2.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.1.norm2.num_batches_tracked": [],
   "encoder.levels.1.blocks.2.conv1.weight": [
     160,
-    1,
+    160,
     3,
     3
   ],
-  "encoder.levels.1.blocks.2.norm.weight": [
+  "encoder.levels.1.blocks.2.conv1.bias": [
     160
   ],
-  "encoder.levels.1.blocks.2.norm.bias": [
+  "encoder.levels.1.blocks.2.norm1.weight": [
     160
   ],
+  "encoder.levels.1.blocks.2.norm1.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm1.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm1.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm1.num_batches_tracked": [],
   "encoder.levels.1.blocks.2.conv2.weight": [
-    640,
     160,
-    1,
-    1
-  ],
-  "encoder.levels.1.blocks.2.conv3.weight": [
     160,
-    640,
-    1,
-    1
+    3,
+    3
   ],
+  "encoder.levels.1.blocks.2.conv2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm2.weight": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm2.bias": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm2.running_mean": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm2.running_var": [
+    160
+  ],
+  "encoder.levels.1.blocks.2.norm2.num_batches_tracked": [],
   "encoder.levels.1.downsample.reduction.0.weight": [
     320,
     160,
@@ -152,34 +232,36 @@
     320
   ],
   "encoder.levels.2.blocks.0.mixer.A_log": [
-    320,
+    160,
     8
   ],
   "encoder.levels.2.blocks.0.mixer.D": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.0.mixer.in_proj.weight": [
-    640,
+    320,
     320
   ],
-  "encoder.levels.2.blocks.0.mixer.conv1d.weight": [
-    320,
+  "encoder.levels.2.blocks.0.mixer.conv1d_x.weight": [
+    160,
     1,
     3
   ],
-  "encoder.levels.2.blocks.0.mixer.conv1d.bias": [
-    320
+  "encoder.levels.2.blocks.0.mixer.conv1d_z.weight": [
+    160,
+    1,
+    3
   ],
   "encoder.levels.2.blocks.0.mixer.x_proj.weight": [
     36,
-    320
+    160
   ],
   "encoder.levels.2.blocks.0.mixer.dt_proj.weight": [
-    320,
+    160,
     20
   ],
   "encoder.levels.2.blocks.0.mixer.dt_proj.bias": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.0.mixer.out_proj.weight": [
     320,
@@ -212,34 +294,36 @@
     320
   ],
   "encoder.levels.2.blocks.1.mixer.A_log": [
-    320,
+    160,
     8
   ],
   "encoder.levels.2.blocks.1.mixer.D": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.1.mixer.in_proj.weight": [
-    640,
+    320,
     320
   ],
-  "encoder.levels.2.blocks.1.mixer.conv1d.weight": [
-    320,
+  "encoder.levels.2.blocks.1.mixer.conv1d_x.weight": [
+    160,
     1,
     3
   ],
-  "encoder.levels.2.blocks.1.mixer.conv1d.bias": [
-    320
+  "encoder.levels.2.blocks.1.mixer.conv1d_z.weight": [
+    160,
+    1,
+    3
   ],
   "encoder.levels.2.blocks.1.mixer.x_proj.weight": [
     36,
-    320
+    160
   ],
   "encoder.levels.2.blocks.1.mixer.dt_proj.weight": [
-    320,
+    160,
     20
   ],
   "encoder.levels.2.blocks.1.mixer.dt_proj.bias": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.1.mixer.out_proj.weight": [
     320,
@@ -272,34 +356,36 @@
     320
   ],
   "encoder.levels.2.blocks.2.mixer.A_log": [
-    320,
+    160,
     8
   ],
   "encoder.levels.2.blocks.2.mixer.D": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.2.mixer.in_proj.weight": [
-    640,
+    320,
     320
   ],
-  "encoder.levels.2.blocks.2.mixer.conv1d.weight": [
-    320,
+  "encoder.levels.2.blocks.2.mixer.conv1d_x.weight": [
+    160,
     1,
     3
   ],
-  "encoder.levels.2.blocks.2.mixer.conv1d.bias": [
-    320
+  "encoder.levels.2.blocks.2.mixer.conv1d_z.weight": [
+    160,
+    1,
+    3
   ],
   "encoder.levels.2.blocks.2.mixer.x_proj.weight": [
     36,
-    320
+    160
   ],
   "encoder.levels.2.blocks.2.mixer.dt_proj.weight": [
-    320,
+    160,
     20
   ],
   "encoder.levels.2.blocks.2.mixer.dt_proj.bias": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.2.mixer.out_proj.weight": [
     320,
@@ -332,34 +418,36 @@
     320
   ],
   "encoder.levels.2.blocks.3.mixer.A_log": [
-    320,
+    160,
     8
   ],
   "encoder.levels.2.blocks.3.mixer.D": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.3.mixer.in_proj.weight": [
-    640,
+    320,
     320
   ],
-  "encoder.levels.2.blocks.3.mixer.conv1d.weight": [
-    320,
+  "encoder.levels.2.blocks.3.mixer.conv1d_x.weight": [
+    160,
     1,
     3
   ],
-  "encoder.levels.2.blocks.3.mixer.conv1d.bias": [
-    320
+  "encoder.levels.2.blocks.3.mixer.conv1d_z.weight": [
+    160,
+    1,
+    3
   ],
   "encoder.levels.2.blocks.3.mixer.x_proj.weight": [
     36,
-    320
+    160
   ],
   "encoder.levels.2.blocks.3.mixer.dt_proj.weight": [
-    320,
+    160,
     20
   ],
   "encoder.levels.2.blocks.3.mixer.dt_proj.bias": [
-    320
+    160
   ],
   "encoder.levels.2.blocks.3.mixer.out_proj.weight": [
     320,
@@ -558,34 +646,36 @@
     640
   ],
   "encoder.levels.3.blocks.0.mixer.A_log": [
-    640,
+    320,
     8
   ],
   "encoder.levels.3.blocks.0.mixer.D": [
-    640
+    320
   ],
   "encoder.levels.3.blocks.0.mixer.in_proj.weight": [
-    1280,
+    640,
     640
   ],
-  "encoder.levels.3.blocks.0.mixer.conv1d.weight": [
-    640,
+  "encoder.levels.3.blocks.0.mixer.conv1d_x.weight": [
+    320,
     1,
     3
   ],
-  "encoder.levels.3.blocks.0.mixer.conv1d.bias": [
-    640
+  "encoder.levels.3.blocks.0.mixer.conv1d_z.weight": [
+    320,
+    1,
+    3
   ],
   "encoder.levels.3.blocks.0.mixer.x_proj.weight": [
     56,
-    640
+    320
   ],
   "encoder.levels.3.blocks.0.mixer.dt_proj.weight": [
-    640,
+    320,
     40
   ],
   "encoder.levels.3.blocks.0.mixer.dt_proj.bias": [
-    640
+    320
   ],
   "encoder.levels.3.blocks.0.mixer.out_proj.weight": [
     640,
@@ -618,34 +708,36 @@
     640
   ],
   "encoder.levels.3.blocks.1.mixer.A_log": [
-    640,
+    320,
     8
   ],
   "encoder.levels.3.blocks.1.mixer.D": [
-    640
+    320
   ],
   "encoder.levels.3.blocks.1.mixer.in_proj.weight": [
-    1280,
+    640,
     640
   ],
-  "encoder.levels.3.blocks.1.mixer.conv1d.weight": [
-    640,
+  "encoder.levels.3.blocks.1.mixer.conv1d_x.weight": [
+    320,
     1,
     3
   ],
-  "encoder.levels.3.blocks.1.mixer.conv1d.bias": [
-    640
+  "encoder.levels.3.blocks.1.mixer.conv1d_z.weight": [
+    320,
+    1,
+    3
   ],
   "encoder.levels.3.blocks.1.mixer.x_proj.weight": [
     56,
-    640
+    320
   ],
   "encoder.levels.3.blocks.1.mixer.dt_proj.weight": [
-    640,
+    320,
     40
   ],
   "encoder.levels.3.blocks.1.mixer.dt_proj.bias": [
-    640
+    320
   ],
   "encoder.levels.3.blocks.1.mixer.out_proj.weight": [
     640,

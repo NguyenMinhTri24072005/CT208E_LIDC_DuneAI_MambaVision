@@ -7,6 +7,7 @@ Quy tắc bất biến:
     * Stem: PatchEmbed stride 4.
     * Stage 1 & 2: ConvBlock (Depthwise Separable Conv).
     * Stage 3 & 4: Block hybrid chứa 1 Mixer (MambaVisionMixer HOẶC WindowAttention) + Mlp(fc1, fc2).
+    * MambaVisionMixer: Cấu trúc nhánh đối xứng chuẩn NVIDIA với conv1d_x, conv1d_z, Selective Scan và out_proj.
     * Tỷ lệ phân chia Stage 3: 4 Mamba + 4 Attention (công thức depths[i] // 2).
     * Tỷ lệ phân chia Stage 4: 2 Mamba + 2 Attention.
     * Downsample: nn.Conv2d stride 2 thuần túy (không norm bên trong).
@@ -79,10 +80,10 @@ class PatchEmbed(nn.Module):
         self.conv_down = nn.Sequential(
             nn.Conv2d(in_chans, in_dim, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(in_dim),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(in_dim, dim, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(dim),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -90,27 +91,27 @@ class PatchEmbed(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    """Khối tích chập sâu (Depthwise Separable Conv) cho Stage 1 & 2 chuẩn NVIDIA."""
-    def __init__(self, dim: int, drop_path: float = 0.0, layer_scale: Optional[float] = None):
+    """Khối tích chập ResNet-style chuẩn NVIDIA (Conv3x3 + BN + GELU + Conv3x3 + BN)."""
+    def __init__(self, dim: int, drop_path: float = 0.0, layer_scale: Optional[float] = None, kernel_size: int = 3):
         super().__init__()
-        self.conv1 = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
-        self.norm = LayerNorm2d(dim)
-        self.conv2 = nn.Conv2d(dim, dim * 4, kernel_size=1, bias=False)
-        self.act = nn.GELU()
-        self.conv3 = nn.Conv2d(dim * 4, dim, kernel_size=1, bias=False)
+        self.conv1 = nn.Conv2d(dim, dim, kernel_size=kernel_size, stride=1, padding=kernel_size // 2, bias=True)
+        self.norm1 = nn.BatchNorm2d(dim, eps=1e-5)
+        self.act1 = nn.GELU(approximate="tanh")
+        self.conv2 = nn.Conv2d(dim, dim, kernel_size=kernel_size, stride=1, padding=kernel_size // 2, bias=True)
+        self.norm2 = nn.BatchNorm2d(dim, eps=1e-5)
+        self.layer_scale = layer_scale is not None and isinstance(layer_scale, (int, float))
+        self.gamma = nn.Parameter(layer_scale * torch.ones(dim, 1, 1)) if self.layer_scale else 1.0
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma = nn.Parameter(layer_scale * torch.ones(dim, 1, 1)) if layer_scale is not None else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_x = x
         x = self.conv1(x)
-        x = self.norm(x)
+        x = self.norm1(x)
+        x = self.act1(x)
         x = self.conv2(x)
-        x = self.act(x)
-        x = self.conv3(x)
-        if self.gamma is not None:
-            x = self.gamma * x
-        return input_x + self.drop_path(x)
+        x = self.norm2(x)
+        x = input_x + self.drop_path(self.gamma * x)
+        return x
 
 
 class Mlp(nn.Module):
@@ -142,7 +143,7 @@ class Mlp(nn.Module):
 
 
 class MambaVisionMixer(nn.Module):
-    """Khối trộn đặc trưng không gian dựa trên 1D Selective Scan State Space Model chuẩn NVIDIA."""
+    """Khối trộn đặc trưng không gian dựa trên nhánh đối xứng conv1d_x/conv1d_z và 1D Selective Scan chuẩn NVIDIA."""
     def __init__(
         self,
         d_model: int,
@@ -155,7 +156,7 @@ class MambaVisionMixer(nn.Module):
         dt_init: str = "random",
         dt_scale: float = 1.0,
         dt_init_floor: float = 1e-4,
-        conv_bias: bool = True,
+        conv_bias: bool = False,
         bias: bool = False,
     ):
         super().__init__()
@@ -166,20 +167,30 @@ class MambaVisionMixer(nn.Module):
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
 
-        self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias)
-        self.conv1d = nn.Conv1d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
+        # Trong MambaVision: in_proj chiếu từ d_model sang d_inner (sau đó chunk 2 thành x và z)
+        self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias)
+
+        # 2 nhánh tích chập 1D độc lập cho x và z
+        self.conv1d_x = nn.Conv1d(
+            in_channels=self.d_inner // 2,
+            out_channels=self.d_inner // 2,
             bias=conv_bias,
             kernel_size=d_conv,
-            groups=self.d_inner,
+            groups=self.d_inner // 2,
             padding=d_conv - 1,
         )
-        self.activation = "silu"
+        self.conv1d_z = nn.Conv1d(
+            in_channels=self.d_inner // 2,
+            out_channels=self.d_inner // 2,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            groups=self.d_inner // 2,
+            padding=d_conv - 1,
+        )
         self.act = nn.SiLU()
 
-        self.x_proj = nn.Linear(self.d_inner, self.dt_rank + self.d_state * 2, bias=False)
-        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner // 2, self.dt_rank + self.d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner // 2, bias=True)
 
         dt_init_std = self.dt_rank**-0.5 * dt_scale
         if dt_init == "constant":
@@ -188,7 +199,7 @@ class MambaVisionMixer(nn.Module):
             nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
 
         dt = torch.exp(
-            torch.rand(self.d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
+            torch.rand(self.d_inner // 2) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
         ).clamp(min=dt_init_floor)
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         with torch.no_grad():
@@ -198,12 +209,12 @@ class MambaVisionMixer(nn.Module):
         A = repeat(
             torch.arange(1, self.d_state + 1, dtype=torch.float32),
             "n -> d n",
-            d=self.d_inner,
+            d=self.d_inner // 2,
         ).contiguous()
         A_log = torch.log(A)
         self.A_log = nn.Parameter(A_log)
         self.A_log._no_weight_decay = True
-        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.D = nn.Parameter(torch.ones(self.d_inner // 2))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias)
@@ -211,34 +222,39 @@ class MambaVisionMixer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         b, l, d = hidden_states.shape
         xz = self.in_proj(hidden_states)
-        x, z = xz.chunk(2, dim=-1)
+        xz = xz.transpose(1, 2)
+        x, z = xz.chunk(2, dim=1)
 
-        x = x.transpose(1, 2)
-        x = self.conv1d(x)[:, :, :l]
+        x = self.conv1d_x(x)[:, :, :l]
         x = self.act(x)
-        x = x.transpose(1, 2)
 
-        x_for_proj = x.reshape(b * l, -1)
+        z = self.conv1d_z(z)[:, :, :l]
+        z = self.act(z)
+
+        x_trans = x.transpose(1, 2)
+        x_for_proj = x_trans.reshape(b * l, -1)
         x_dbl = self.x_proj(x_for_proj)
         dt, B_proj, C_proj = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
 
         dt = self.dt_proj(dt).view(b, l, -1).transpose(1, 2)
         B_proj = B_proj.view(b, l, -1).transpose(1, 2)
         C_proj = C_proj.view(b, l, -1).transpose(1, 2)
-        x_in = x.transpose(1, 2)
 
         A = -torch.exp(self.A_log.float())
         y = selective_scan_fn(
-            x_in,
+            x,
             dt,
             A,
             B_proj,
             C_proj,
             self.D.float(),
-            z=z.transpose(1, 2),
+            z=None,
             delta_bias=self.dt_proj.bias.float(),
             delta_softplus=True,
         )
+
+        # Ghép nối nhánh SSM (y) và nhánh tích chập điều chế (z) theo chuẩn NVIDIA MambaVision
+        y = torch.cat([y, z], dim=1)
         y = y.transpose(1, 2)
         return self.out_proj(y)
 

@@ -140,9 +140,11 @@ def load_pretrained_mambavision(
         raise FileNotFoundError(f"Không tìm thấy file trọng số pretrained tại: {p}")
 
     try:
+        import argparse
+        if hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals([argparse.Namespace])
         ckpt = torch.load(p, map_location=map_location, weights_only=True)
-    except Exception as e:
-        print(f"⚠️ weights_only=True ({e}), fallback weights_only=False...")
+    except Exception:
         ckpt = torch.load(p, map_location=map_location, weights_only=False)
 
     sd = ckpt.get("model", ckpt.get("state_dict", ckpt))

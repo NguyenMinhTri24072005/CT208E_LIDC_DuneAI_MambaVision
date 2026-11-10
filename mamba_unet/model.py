@@ -129,9 +129,9 @@ def _selftest():
     # Kiểm tra số lượng keys của mamba_vision_T đầy đủ
     full_model = MambaUNet(in_channels=3, num_classes=1, backbone="mamba_vision_T", pretrained=False)
     keys = list(full_model.state_dict().keys())
-    assert len(keys) == 264, f"Số keys phải là 264 (214 encoder + 50 decoder), nhận được {len(keys)}"
+    assert len(keys) == 300, f"Số keys phải là 300 (250 encoder + 50 decoder), nhận được {len(keys)}"
     assert all(k.startswith("encoder.") or k.startswith("decoder.") for k in keys), "Keys phải có tiền tố encoder. hoặc decoder."
-    print(f"✅ Selftest mamba_unet.model hoàn tất thành công ({len(keys)}/264 keys chuẩn xác)!")
+    print(f"✅ Selftest mamba_unet.model hoàn tất thành công ({len(keys)}/300 keys chuẩn xác)!")
 
 
 if __name__ == "__main__":

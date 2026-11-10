@@ -5,7 +5,7 @@ tests/test_state_dict_invariance.py - Kiểm tra bất biến 100% tập khóa v
 Quy tắc bất biến (R3, spec mục 9):
   - unet_base: 118 keys và shapes trùng 100% tests/golden/unet_base_keys.json.
   - unet_base snapshot: nạp tiny_state strict=True, sai khác tensor đầu ra atol <= 1e-6.
-  - mamba_unet: 264 keys và shapes trùng 100% tests/golden/mamba_unet_keys.json.
+  - mamba_unet: 300 keys và shapes trùng 100% tests/golden/mamba_unet_keys.json.
   - mamba_unet snapshot: nạp tiny_state strict=True, sai khác tensor đầu ra atol <= 1e-6.
   - Ánh xạ tiền tố encoder./decoder. cho checkpoint legacy prefixless khớp 100%.
 """
@@ -104,7 +104,7 @@ class TestStateDictInvarianceMambaUNet(unittest.TestCase):
             cls.expected_keys_shapes = json.load(f)
 
     def test_mamba_unet_keys_and_shapes_match_golden(self):
-        """Kiểm tra 264 keys và shapes của MambaUNet(backbone='mamba_vision_T') trùng khớp 100% golden."""
+        """Kiểm tra 300 keys và shapes của MambaUNet(backbone='mamba_vision_T') trùng khớp 100% golden."""
         model = MambaUNet(in_channels=3, num_classes=1, backbone="mamba_vision_T", pretrained=False, act="relu")
         sd = model.state_dict()
 
