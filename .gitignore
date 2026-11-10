@@ -74,3 +74,5 @@ wandb/
 # Bỏ qua các bản sao lưu cấu hình vô tình được tạo ra trên máy local
 model/configs/*(1)*
 model/configs/*copy*
+wheels/*.whl
+pretrained_weights/
