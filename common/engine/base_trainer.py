@@ -149,13 +149,14 @@ class BaseTrainer:
             images = window_hu_torch(images)
         return images, masks
 
-    def run_epoch(self, loader, is_train: bool = True, epoch: Optional[int] = None, total_epochs: Optional[int] = None) -> Dict[str, float]:
+    def run_epoch(self, loader, is_train: bool = True, epoch: Optional[int] = None, total_epochs: Optional[int] = None) -> Dict[str, Any]:
         self.model.train(is_train)
         total_loss = 0.0
         total_samples = 0
         inter_sum = 0.0
         pred_sum = 0.0
         target_sum = 0.0
+        sub_loss_sums: Dict[str, float] = {}
 
         phase = "Train" if is_train else "Val  "
         ep_prefix = f"Epoch [{epoch:02d}/{total_epochs:02d}] {phase}" if (epoch and total_epochs) else phase
@@ -193,6 +194,16 @@ class BaseTrainer:
                 total_loss += float(loss.item()) * bs
                 total_samples += bs
 
+                # Thu thập sub-losses nếu hàm criterion hỗ trợ
+                if hasattr(self.criterion, "get_components"):
+                    comps = self.criterion.get_components()
+                    for k, v in comps.items():
+                        sub_loss_sums[k] = sub_loss_sums.get(k, 0.0) + float(v) * bs
+                elif hasattr(self.criterion, "last_components"):
+                    comps = self.criterion.last_components
+                    for k, v in comps.items():
+                        sub_loss_sums[k] = sub_loss_sums.get(k, 0.0) + float(v) * bs
+
                 m = self.metric_fn(logits.detach(), masks)
                 inter_sum += m["intersection"]
                 pred_sum += m["pred_sum"]
@@ -201,7 +212,17 @@ class BaseTrainer:
                 if use_bar:
                     running_loss = total_loss / max(1, total_samples)
                     running_dice = (2.0 * inter_sum + 1e-6) / (pred_sum + target_sum + 1e-6)
-                    iterator.set_postfix(loss=f"{running_loss:.4f}", dice=f"{running_dice:.4f}")
+                    running_union = pred_sum + target_sum - inter_sum
+                    running_iou = (inter_sum + 1e-6) / (running_union + 1e-6)
+                    p_dict = {
+                        "loss": f"{running_loss:.4f}",
+                        "dice": f"{running_dice:.4f}",
+                        "iou": f"{running_iou:.4f}",
+                    }
+                    if sub_loss_sums:
+                        for k, v in sub_loss_sums.items():
+                            p_dict[k] = f"{(v / max(1, total_samples)):.4f}"
+                    iterator.set_postfix(**p_dict)
 
         eps = 1e-6
         epoch_loss = total_loss / max(1, total_samples)
@@ -209,7 +230,15 @@ class BaseTrainer:
         union_sum = pred_sum + target_sum - inter_sum
         epoch_iou = (inter_sum + eps) / (union_sum + eps)
 
-        return {"loss": epoch_loss, "dice": epoch_dice, "iou": epoch_iou}
+        out_metrics = {
+            "loss": epoch_loss,
+            "dice": epoch_dice,
+            "iou": epoch_iou,
+        }
+        if sub_loss_sums:
+            out_metrics["sub_losses"] = {k: (v / max(1, total_samples)) for k, v in sub_loss_sums.items()}
+
+        return out_metrics
 
     def save_checkpoint(self, filename: str, epoch: int, val_metrics: Dict[str, float]) -> Path:
         """Lưu checkpoint và xuất fp16 nếu là best_model."""
@@ -386,6 +415,11 @@ class BaseTrainer:
                     "time_sec": round(elapsed, 2),
                     "eta_sec": round(eta_sec, 2),
                 }
+                # Bổ sung các thành phần sub-losses vào history nếu có
+                for k, v in train_m.get("sub_losses", {}).items():
+                    row[f"train_{k}"] = round(v, 5)
+                for k, v in val_m.get("sub_losses", {}).items():
+                    row[f"val_{k}"] = round(v, 5)
 
                 self.history = [r for r in self.history if int(r.get("epoch", -1)) != epoch] + [row]
                 from common.engine.utils import atomic_save_json
@@ -415,11 +449,19 @@ class BaseTrainer:
                         last_val_iou=val_m["iou"],
                     )
 
+                def _fmt_phase(m: Dict[str, Any]) -> str:
+                    s = f"Loss: {m['loss']:.4f}"
+                    if m.get("sub_losses"):
+                        sub_str = ", ".join(f"{k}: {v:.4f}" for k, v in m["sub_losses"].items())
+                        s += f" ({sub_str})"
+                    s += f", Dice: {m['dice']:.4f}, IoU: {m['iou']:.4f}"
+                    return s
+
                 badge = "⭐ [BEST]" if is_best else ""
                 log_msg = (
                     f"Epoch [{epoch:02d}/{epochs:02d}] | LR: {lr:.2e} | "
-                    f"Train [Loss: {train_m['loss']:.4f}, Dice: {train_m['dice']:.4f}] | "
-                    f"Val [Loss: {val_m['loss']:.4f}, Dice: {val_m['dice']:.4f}] | "
+                    f"Train [{_fmt_phase(train_m)}] | "
+                    f"Val [{_fmt_phase(val_m)}] | "
                     f"Time: {format_duration(elapsed)} | ETA: {format_duration(eta_sec)} {badge}"
                 )
                 if self.run_handle:
