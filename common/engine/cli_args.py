@@ -85,6 +85,11 @@ def add_common_args(
     # 6. Chạy & Quản lý Run
     run_group = parser.add_argument_group("Quản lý phiên chạy (Run)")
     run_group.add_argument("--runs-root", default=None, help="Thư mục gốc lưu trữ các lần chạy")
+    run_group.add_argument(
+        "--drive-sync-dir",
+        default=None,
+        help="Đường dẫn thư mục Google Drive để tự động đồng bộ checkpoints và logs thời gian thực sau mỗi epoch",
+    )
     run_group.add_argument("--run-name", default=None, help="Tên tùy chỉnh cho phiên chạy")
     run_group.add_argument("--tag", default=None, help="Thẻ phân loại thí nghiệm (vd: baseline, ablation)")
     run_group.add_argument("--notes", default="", help="Ghi chú chi tiết cho thí nghiệm")

@@ -165,6 +165,7 @@ def train_action(args):
         grad_clip=args.grad_clip,
         use_amp=not args.no_amp,
         show_progress=not args.no_progress,
+        drive_sync_dir=getattr(args, "drive_sync_dir", None),
     )
 
     # 6. Tối ưu hóa (Optimizer & Scheduler với phân nhóm param groups)
@@ -220,13 +221,15 @@ def overfit_action(args):
         save_dir=tempfile.mkdtemp(),
         show_progress=False,
         use_amp=False,
+        drive_sync_dir=getattr(args, "drive_sync_dir", None),
     )
     optimizer = torch.optim.AdamW(trainer.build_param_groups(1e-3), weight_decay=1e-4)
     trainer.optimizer = optimizer
 
-    history = trainer.fit(train_loader, val_loader, epochs=5)
+    epochs = getattr(args, "epochs", 5)
+    history = trainer.fit(train_loader, val_loader, epochs=epochs)
     final_dice = history[-1]["val_dice"]
-    print(f"✅ Hoàn thành 5 epochs overfit! Final Val Dice: {final_dice:.4f}")
+    print(f"✅ Hoàn thành {epochs} epochs overfit! Final Val Dice: {final_dice:.4f}")
 
 
 def selftest_action(_):

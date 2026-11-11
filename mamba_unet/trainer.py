@@ -42,13 +42,13 @@ class MambaUNetTrainer(BaseTrainer):
         backbone_lr_mult: float = 0.1,
         **kwargs,
     ):
-        super().__init__(model=model, criterion=criterion, **kwargs)
         self.backbone_name = backbone_name
         self.activation_name = activation_name
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.freeze_backbone_epochs = int(freeze_backbone_epochs)
         self.backbone_lr_mult = float(backbone_lr_mult)
+        super().__init__(model=model, criterion=criterion, **kwargs)
 
     def on_epoch_start(self, epoch: int):
         """Hook điều khiển đóng/mở băng backbone suy ra từ số epoch hiện tại."""
@@ -88,19 +88,25 @@ class MambaUNetTrainer(BaseTrainer):
 
     def checkpoint_meta(self) -> Dict[str, Any]:
         """Metadata kiến trúc chuẩn của mamba_unet."""
+        bb = getattr(self, "backbone_name", "mamba_vision_T")
+        act = getattr(self, "activation_name", "relu")
+        in_ch = getattr(self, "in_channels", 3)
+        num_cls = getattr(self, "num_classes", 1)
+        freeze_ep = getattr(self, "freeze_backbone_epochs", 0)
+        lr_mult = getattr(self, "backbone_lr_mult", 0.1)
         return {
             "arch": "mamba_unet",
-            "backbone": self.backbone_name,
-            "activation": self.activation_name,
-            "in_channels": self.in_channels,
-            "num_classes": self.num_classes,
-            "freeze_backbone_epochs": self.freeze_backbone_epochs,
-            "backbone_lr_mult": self.backbone_lr_mult,
+            "backbone": bb,
+            "activation": act,
+            "in_channels": in_ch,
+            "num_classes": num_cls,
+            "freeze_backbone_epochs": freeze_ep,
+            "backbone_lr_mult": lr_mult,
             "model_config": {
-                "backbone": self.backbone_name,
-                "activation": self.activation_name,
-                "in_channels": self.in_channels,
-                "num_classes": self.num_classes,
+                "backbone": bb,
+                "activation": act,
+                "in_channels": in_ch,
+                "num_classes": num_cls,
             },
         }
 

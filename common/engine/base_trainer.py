@@ -14,7 +14,9 @@ common/engine/base_trainer.py - Vòng lặp huấn luyện chuẩn BaseTrainer d
       * build_param_groups(lr): phân nhóm learning rate cho backbone/decoder
 """
 
+import datetime
 import os
+import shutil
 import sys
 import time
 from contextlib import nullcontext
@@ -83,6 +85,7 @@ class BaseTrainer:
         run_handle: Optional[RunHandle] = None,
         grad_clip: float = 1.0,
         show_progress: bool = True,
+        drive_sync_dir: Optional[Union[str, Path]] = None,
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.is_cuda = self.device.type == "cuda"
@@ -118,6 +121,120 @@ class BaseTrainer:
         self.best_epoch = None
         self.no_improve = 0
         self.history: List[Dict[str, Any]] = []
+
+        # Thiết lập cơ chế tự động đồng bộ sang Google Drive thời gian thực
+        self.drive_sync_dir = Path(drive_sync_dir).resolve() if drive_sync_dir else None
+        if self.drive_sync_dir:
+            self.drive_run_dir = self.drive_sync_dir / self.save_dir.name
+            try:
+                self.drive_run_dir.mkdir(parents=True, exist_ok=True)
+                print(f"🔗 [Auto-Sync] Đã kết nối Google Drive: {self.drive_run_dir}")
+                self._init_drive_backup_metadata()
+            except Exception as e:
+                print(f"⚠️ [Auto-Sync] Không thể tạo thư mục Google Drive ({e}). Tiếp tục train trên SSD cục bộ.")
+                self.drive_run_dir = None
+        else:
+            self.drive_run_dir = None
+
+    def _safe_sync_file(self, src_file: Union[str, Path], dst_filename: Optional[str] = None):
+        """Sao chép an toàn một tệp sang Google Drive mà không chặn hoặc gây crash nếu lỗi mạng."""
+        if not self.drive_run_dir:
+            return
+        src = Path(src_file)
+        if not src.exists():
+            return
+        dst_name = dst_filename or src.name
+        dst = self.drive_run_dir / dst_name
+        try:
+            tmp_dst = self.drive_run_dir / f".tmp_{dst_name}_{os.getpid()}"
+            shutil.copy2(src, tmp_dst)
+            os.replace(str(tmp_dst), str(dst))
+        except Exception:
+            pass
+
+    def _init_drive_backup_metadata(self):
+        """Khởi tạo trước tệp DATA_SPEC_AND_CONFIG.md và REPORT.md trên Drive ngay từ đầu."""
+        if not self.drive_run_dir:
+            return
+        try:
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            meta = self.checkpoint_meta()
+            arch_name = meta.get("arch", "model")
+            bb_name = meta.get("backbone", "N/A")
+            act_name = meta.get("activation", "relu")
+
+            try:
+                import configs.config as med_cfg
+                win_w = getattr(med_cfg, "WINDOW_WIDTH", 1500)
+                win_l = getattr(med_cfg, "WINDOW_LEVEL", -600)
+                resamp = getattr(med_cfg, "RESAMPLING_STEP", 25)
+                tumor_lim = getattr(med_cfg, "TUMOR_SIZE_LOW_LIM", 20.0)
+                zero_r = getattr(med_cfg, "ZERO_SL_RATIO", 0.25)
+                val_sp = getattr(med_cfg, "VAL_SPLIT", 0.15)
+                img_sz = getattr(med_cfg, "IMAGE_SIZE", 512)
+            except Exception:
+                win_w, win_l, resamp, tumor_lim, zero_r, val_sp, img_sz = 1500, -600, 25, 20.0, 0.25, 0.15, 512
+
+            data_spec_md = f"""# 📊 HỒ SƠ DỮ LIỆU & CẤU HÌNH HUẤN LUYỆN
+## Phiên chạy: `{self.save_dir.name}`
+*Khởi tạo lúc: {now_str}*
+
+### 1. Phân Chia Dữ Liệu & Quy Chuẩn Tiền Xử Lý Y Tế
+- **Kiến trúc mô hình**: `{arch_name}` (Backbone: `{bb_name}`, Activation: `{act_name}`)
+- **Chiến lược phân chia**: Patient-Level Split, Zero Patient Leakage (Val Split: {val_sp * 100:.0f}%)
+- **Quy chuẩn lọc khối u**: `TUMOR_SIZE_LOW_LIM = {tumor_lim} mm²` (loại bỏ nốt u nhỏ hơn {tumor_lim} mm²)
+- **Chuẩn hóa Hounsfield Unit (HU)**:
+  - Cửa sổ phổi: `WINDOW_WIDTH = {win_w} HU`, `WINDOW_LEVEL = {win_l} HU` (Dải quan sát: [{win_l - win_w // 2}, {win_l + win_w // 2}] HU)
+  - Lượng tử hóa bước nhảy: `RESAMPLING_STEP = {resamp} HU` (làm tròn {resamp} HU mỗi bước để giảm nhiễu hạt máy quét CT và nén dữ liệu cache)
+- **Tỷ lệ lấy mẫu lát cắt âm tính**: `ZERO_SL_RATIO = {zero_r}` (giữ lại {zero_r * 100:.0f}% lát cắt âm tính có nhu mô phổi)
+- **Kích thước ảnh**: {img_sz}x{img_sz} (Định dạng 2.5D: 3 lát cắt kế tiếp [z-1, z, z+1])
+"""
+            spec_file = self.save_dir / "DATA_SPEC_AND_CONFIG.md"
+            with open(spec_file, "w", encoding="utf-8") as f:
+                f.write(data_spec_md)
+            self._safe_sync_file(spec_file)
+
+            report_md = f"""# 📋 Báo Cáo Huấn Luyện: {self.save_dir.name}
+- **Thời gian khởi tạo**: {now_str}
+- **Trạng thái**: Đang huấn luyện (Running)
+- **Kiến trúc**: `{arch_name}` | Backbone: `{bb_name}` | Activation: `{act_name}`
+- **Hồ sơ cấu hình dữ liệu**: Xem chi tiết tại [DATA_SPEC_AND_CONFIG.md](DATA_SPEC_AND_CONFIG.md)
+"""
+            rep_file = self.save_dir / "REPORT.md"
+            if not rep_file.exists():
+                with open(rep_file, "w", encoding="utf-8") as f:
+                    f.write(report_md)
+                self._safe_sync_file(rep_file)
+
+        except Exception as e:
+            print(f"ℹ️ [Auto-Sync] Khởi tạo metadata ban đầu: {e}")
+
+    def _update_report_md(self, val_m: Dict[str, Any], epoch: int, is_best: bool = False):
+        """Cập nhật tệp REPORT.md với số liệu Dice và IoU mới nhất."""
+        rep_file = self.save_dir / "REPORT.md"
+        meta = self.checkpoint_meta()
+        arch_name = meta.get("arch", "model")
+        bb_name = meta.get("backbone", "N/A")
+        act_name = meta.get("activation", "relu")
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        content = f"""# 📋 Báo Cáo Huấn Luyện: {self.save_dir.name}
+- **Thời gian cập nhật**: {now_str}
+- **Kiến trúc**: `{arch_name}` | Backbone: `{bb_name}` | Activation: `{act_name}`
+- **Kết quả huấn luyện**:
+  - **Best Epoch**: **Epoch {self.best_epoch}**
+  - **Best Val Dice**: **{self.best_val_dice:.4f}** ⭐ [BEST]
+  - **Best Val IoU**: **{val_m.get('iou', 0.0):.4f}**
+  - **Val Loss**: **{val_m.get('loss', 0.0):.4f}**
+- **Tiến độ**: Đã hoàn thành Epoch {epoch}
+- **Hồ sơ cấu hình dữ liệu**: Xem chi tiết tại [DATA_SPEC_AND_CONFIG.md](DATA_SPEC_AND_CONFIG.md)
+"""
+        try:
+            with open(rep_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            self._safe_sync_file(rep_file)
+        except Exception:
+            pass
 
     # ==================================================================
     # CÁC ĐIỂM MỞ RỘNG (HOOKS) CHO LỚP CON KIẾN TRÚC
@@ -372,6 +489,10 @@ class BaseTrainer:
         epoch_durations = []
         fit_start_time = time.time()
 
+        # Đảm bảo khởi tạo metadata ban đầu trên Google Drive
+        if self.drive_run_dir:
+            self._init_drive_backup_metadata()
+
         try:
             for epoch in range(self.start_epoch, epochs + 1):
                 ep_t0 = time.time()
@@ -449,6 +570,24 @@ class BaseTrainer:
                         last_val_iou=val_m["iou"],
                     )
 
+                # Tự động đồng bộ thời gian thực sang Google Drive sau mỗi epoch
+                if self.drive_run_dir:
+                    self._safe_sync_file(self.save_dir / "history.csv")
+                    if (self.save_dir / "run_config.json").exists():
+                        self._safe_sync_file(self.save_dir / "run_config.json")
+                    if (self.save_dir / "train.log").exists():
+                        self._safe_sync_file(self.save_dir / "train.log")
+                    if (self.save_dir / "DATA_SPEC_AND_CONFIG.md").exists():
+                        self._safe_sync_file(self.save_dir / "DATA_SPEC_AND_CONFIG.md")
+                    if (self.save_dir / "last_model.pth").exists():
+                        self._safe_sync_file(self.save_dir / "last_model.pth")
+                    if is_best:
+                        if (self.save_dir / "best_model.pth").exists():
+                            self._safe_sync_file(self.save_dir / "best_model.pth")
+                        if (self.save_dir / "best_weights_fp16.pth").exists():
+                            self._safe_sync_file(self.save_dir / "best_weights_fp16.pth")
+                        self._update_report_md(val_m, epoch, is_best=True)
+
                 def _fmt_phase(m: Dict[str, Any]) -> str:
                     s = f"Loss: {m['loss']:.4f}"
                     if m.get("sub_losses"):
@@ -480,6 +619,15 @@ class BaseTrainer:
             if self.run_handle:
                 self.run_handle.finish(status="completed")
 
+            if self.drive_run_dir:
+                self._safe_sync_file(self.save_dir / "run_config.json")
+                self._safe_sync_file(self.save_dir / "history.csv")
+                self._safe_sync_file(self.save_dir / "train.log")
+                if (self.save_dir / "DATA_SPEC_AND_CONFIG.md").exists():
+                    self._safe_sync_file(self.save_dir / "DATA_SPEC_AND_CONFIG.md")
+                if (self.save_dir / "REPORT.md").exists():
+                    self._safe_sync_file(self.save_dir / "REPORT.md")
+
         except KeyboardInterrupt:
             last_saved = self.history[-1]["epoch"] if self.history else (self.start_epoch - 1)
             msg = (
@@ -492,12 +640,21 @@ class BaseTrainer:
                 self.run_handle.finish(status="interrupted")
             else:
                 print(msg)
+            if self.drive_run_dir:
+                self._safe_sync_file(self.save_dir / "run_config.json")
+                self._safe_sync_file(self.save_dir / "history.csv")
+                self._safe_sync_file(self.save_dir / "train.log")
+                if (self.save_dir / "last_model.pth").exists():
+                    self._safe_sync_file(self.save_dir / "last_model.pth")
             return self.history
 
         except Exception as e:
             if self.run_handle:
                 self.run_handle.log(f"❌ Ngoại lệ trong khi huấn luyện: {e}")
                 self.run_handle.finish(status="failed")
+            if self.drive_run_dir:
+                self._safe_sync_file(self.save_dir / "run_config.json")
+                self._safe_sync_file(self.save_dir / "train.log")
             raise e
 
         total_time = time.time() - fit_start_time
