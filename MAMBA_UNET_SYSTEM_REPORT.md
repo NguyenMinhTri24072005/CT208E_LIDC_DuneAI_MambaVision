@@ -1,6 +1,6 @@
 # BÁO CÁO KỸ THUẬT & TRỌN BỘ MÃ NGUỒN MAMBA-UNET
 ## HỆ THỐNG PHÂN ĐOẠN KHỐI U PHỔI 2.5D DỰA TRÊN NVIDIA MAMBAVISION & UNET DECODER
-*Phiên bản: DuneAI Mamba-UNet Production v1.0 | Ngày xuất bản: 2026-11-11 15:12:11*
+*Phiên bản: DuneAI Mamba-UNet Production v1.0 | Ngày xuất bản: 2026-11-11 15:25:26*
 *Tương thích phần cứng: NVIDIA Tesla T4 / A100 / RTX 3090 / RTX 4090 | PyTorch 2.6+ | CUDA 12.4+*
 
 ---

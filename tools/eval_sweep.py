@@ -36,6 +36,8 @@ def main():
     ap.add_argument("--thresholds", type=float, nargs="+", default=[0.3, 0.4, 0.5, 0.6, 0.7])
     ap.add_argument("--min-area", type=float, default=20.0)
     ap.add_argument("--tta", action="store_true")
+    ap.add_argument("--limit", type=int, default=0, help="Giới hạn số ca bệnh nhân cần đánh giá (0 = tất cả)")
+    ap.add_argument("--out-dir", default=None, help="Thư mục lưu kết quả CSV (mặc định lưu thư mục hiện tại)")
     ap.add_argument("--out-prefix", default="eval_sweep")
     a = ap.parse_args()
 
@@ -44,6 +46,9 @@ def main():
     cache = Path(a.cache_dir)
     df = pd.read_csv(cache / "slices.csv")
     pids = sorted(df[df["split"] == a.split]["patient_id"].unique())
+    if a.limit > 0:
+        pids = pids[: a.limit]
+    print(f"🔬 Đánh giá quét ngưỡng trên {len(pids)} bệnh nhân tập '{a.split}'...")
 
     pat_rows, nod_rows = [], []
     for pid in pids:
@@ -74,8 +79,13 @@ def main():
         print(f"[{pid}] xong")
 
     P, N = pd.DataFrame(pat_rows), pd.DataFrame(nod_rows)
-    P.to_csv(f"{a.out_prefix}_patients.csv", index=False)
-    N.to_csv(f"{a.out_prefix}_nodules.csv", index=False)
+    out_dir = Path(a.out_dir) if a.out_dir else Path(".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pat_csv = out_dir / f"{a.out_prefix}_patients.csv"
+    nod_csv = out_dir / f"{a.out_prefix}_nodules.csv"
+    P.to_csv(pat_csv, index=False)
+    N.to_csv(nod_csv, index=False)
+    print(f"\n💾 Đã lưu kết quả tại:\n  - {pat_csv}\n  - {nod_csv}")
 
     print("\n=== THEO NGƯỠNG (trung bình trên ca) ===")
     print(P.groupby("th")[["dice", "precision", "recall", "fp_comps"]].mean().round(4))
