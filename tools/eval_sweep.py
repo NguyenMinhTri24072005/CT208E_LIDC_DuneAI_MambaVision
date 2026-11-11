@@ -44,7 +44,21 @@ def main():
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_mamba_unet_model(a.checkpoint, dev, backbone=a.backbone)
     cache = Path(a.cache_dir)
-    df = pd.read_csv(cache / "slices.csv")
+    slices_file = cache / "slices.csv"
+    if not slices_file.exists():
+        # 1. Thử tìm slices.csv trong thư mục run của checkpoint
+        ckpt_slices = Path(a.checkpoint).resolve().parent / "slices.csv"
+        if ckpt_slices.exists():
+            print(f"ℹ️ Phát hiện bản sao chỉ mục tại {ckpt_slices}, đang nạp vào cache...")
+            import shutil
+            shutil.copy2(ckpt_slices, slices_file)
+        else:
+            # 2. Tự động dựng chỉ mục slices.csv từ thư mục cache
+            print(f"⚙️ Chưa tìm thấy {slices_file.name}, đang tự động quét và dựng chỉ mục...")
+            from common.data_pipeline.offline_builder import build_dataset_index
+            build_dataset_index(cache)
+
+    df = pd.read_csv(slices_file)
     pids = sorted(df[df["split"] == a.split]["patient_id"].unique())
     if a.limit > 0:
         pids = pids[: a.limit]

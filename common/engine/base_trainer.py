@@ -86,6 +86,7 @@ class BaseTrainer:
         grad_clip: float = 1.0,
         show_progress: bool = True,
         drive_sync_dir: Optional[Union[str, Path]] = None,
+        cache_dir: Optional[Union[str, Path]] = None,
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.is_cuda = self.device.type == "cuda"
@@ -121,6 +122,7 @@ class BaseTrainer:
         self.best_epoch = None
         self.no_improve = 0
         self.history: List[Dict[str, Any]] = []
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
 
         # Thiết lập cơ chế tự động đồng bộ sang Google Drive thời gian thực
         self.drive_sync_dir = Path(drive_sync_dir).resolve() if drive_sync_dir else None
@@ -205,6 +207,16 @@ class BaseTrainer:
                 with open(rep_file, "w", encoding="utf-8") as f:
                     f.write(report_md)
                 self._safe_sync_file(rep_file)
+
+            # Tự động sao lưu bản sao chỉ mục slices.csv của phiên chạy
+            local_slices = self.save_dir / "slices.csv"
+            if not local_slices.exists() and self.cache_dir and (self.cache_dir / "slices.csv").exists():
+                try:
+                    shutil.copy2(self.cache_dir / "slices.csv", local_slices)
+                except Exception:
+                    pass
+            if local_slices.exists():
+                self._safe_sync_file(local_slices)
 
         except Exception as e:
             print(f"ℹ️ [Auto-Sync] Khởi tạo metadata ban đầu: {e}")
@@ -579,6 +591,8 @@ class BaseTrainer:
                         self._safe_sync_file(self.save_dir / "train.log")
                     if (self.save_dir / "DATA_SPEC_AND_CONFIG.md").exists():
                         self._safe_sync_file(self.save_dir / "DATA_SPEC_AND_CONFIG.md")
+                    if (self.save_dir / "slices.csv").exists():
+                        self._safe_sync_file(self.save_dir / "slices.csv")
                     if (self.save_dir / "last_model.pth").exists():
                         self._safe_sync_file(self.save_dir / "last_model.pth")
                     if is_best:
@@ -623,6 +637,8 @@ class BaseTrainer:
                 self._safe_sync_file(self.save_dir / "run_config.json")
                 self._safe_sync_file(self.save_dir / "history.csv")
                 self._safe_sync_file(self.save_dir / "train.log")
+                if (self.save_dir / "slices.csv").exists():
+                    self._safe_sync_file(self.save_dir / "slices.csv")
                 if (self.save_dir / "DATA_SPEC_AND_CONFIG.md").exists():
                     self._safe_sync_file(self.save_dir / "DATA_SPEC_AND_CONFIG.md")
                 if (self.save_dir / "REPORT.md").exists():
@@ -644,6 +660,8 @@ class BaseTrainer:
                 self._safe_sync_file(self.save_dir / "run_config.json")
                 self._safe_sync_file(self.save_dir / "history.csv")
                 self._safe_sync_file(self.save_dir / "train.log")
+                if (self.save_dir / "slices.csv").exists():
+                    self._safe_sync_file(self.save_dir / "slices.csv")
                 if (self.save_dir / "last_model.pth").exists():
                     self._safe_sync_file(self.save_dir / "last_model.pth")
             return self.history

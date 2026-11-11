@@ -166,6 +166,7 @@ def train_action(args):
         use_amp=not args.no_amp,
         show_progress=not args.no_progress,
         drive_sync_dir=getattr(args, "drive_sync_dir", None),
+        cache_dir=getattr(args, "cache_dir", None),
     )
 
     # 6. Tối ưu hóa (Optimizer & Scheduler với phân nhóm param groups)
