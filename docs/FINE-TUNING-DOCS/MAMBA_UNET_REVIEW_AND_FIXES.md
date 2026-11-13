@@ -1,76 +1,855 @@
-# Mamba-UNet (MambaVision-T + UNet) — Tổng hợp vấn đề, nguyên nhân, cách sửa và cải tiến
+# Mamba-UNet (MambaVision-T + UNet) — Đánh Giá Hệ Thống, Bằng Chứng Bước 0 và Kế Hoạch Cải Tiến Hoàn Thiện
 
-*Dựa trên: `MAMBA_UNET_SYSTEM_REPORT.md`, `medical_prep.py` và nhật ký huấn luyện `mamba_colab_500item_25epoch_extra_test` (50 epoch đặt, dừng sớm ở epoch 42, best Val Dice 0.7456 ở epoch 30, 500 ca LIDC / 1010).*
+* **Dự án**: Phân đoạn nốt phổi trên ảnh cắt lớp vi tính lồng ngực (LIDC-IDRI) bằng kiến trúc lai Mamba-UNet (UM-LOAN).
+* **Mô hình đường cơ sở (Baseline $R_0$)**: `best_model.pth` trong `mamba_unet/runs/mamba_colab_500item_25epoch_extra_test` (500 ca LIDC-IDRI, dừng sớm ở Epoch 42, Best Epoch 30 với $\text{Val Dice}_{2D} = 0.7456$, $\text{Mean Dice}_{3D} = 0.3771$).
+* **Tài liệu nguồn gốc & Chốt đối chiếu**: 
+  * Báo cáo đo lường thực tế Bước 0: [`docs/STEP0_MEASUREMENT_RESULTS/STEP0_FULL_METRICS_SUMMARY.md`](../STEP0_MEASUREMENT_RESULTS/STEP0_FULL_METRICS_SUMMARY.md)
+  * Đề xuất điều chỉnh chẩn đoán: [`STEP0_PLAN_ADJUSTMENT_PROPOSAL.md`](STEP0_PLAN_ADJUSTMENT_PROPOSAL.md)
+  * Phản biện khoa học & kiểm soát biến: [`STEP0_PROPOSALS_CRITIQUE_AND_FINAL_PLAN.md`](STEP0_PROPOSALS_CRITIQUE_AND_FINAL_PLAN.md)
+  * Văn bản chốt quyết định 18 điểm: [`MAMBA_UNET_STEP0_CONSOLIDATED_PLAN.md`](MAMBA_UNET_STEP0_CONSOLIDATED_PLAN.md)
 
-> **Quy ước:** mọi thay đổi bên dưới đều có **giá trị mặc định = hành vi hiện tại** (cờ mới mặc định tắt) để không phá vỡ code, test và golden keys đang có. Các con số "kỳ vọng" là ước lượng kinh nghiệm để xếp thứ tự ưu tiên, **không phải cam kết** — phải kiểm chứng bằng ablation (mục 7).
-
----
-
-## 0. Tóm tắt
-
-- Val Dice 0.7456, Train Dice 0.87 → khoảng cách ~0.13 và val phẳng từ epoch ~24 dù LR giảm 10 lần ⇒ **đã chạm trần tổng quát hóa của cấu hình hiện tại** (không phải vấn đề tối ưu hóa).
-- Run mẫu 25 epoch (0.7412) và run 50 epoch (0.7456) chỉ lệch 0.004 ⇒ tăng thêm epoch **không** giúp.
-- Nguyên nhân chính nằm ở: (1) pipeline dữ liệu làm val 2D lạc quan và lệch so với suy luận 3D, (2) decoder chỉ ra feature H/4 rồi upsample ×4, (3) ít dữ liệu + regularization yếu (weight decay vô hiệu, augmentation nghèo), (4) chưa có đo lường đúng (3D, theo nốt, P/R).
-- **Làm trước (không tốn công train):** chạy `tools/eval_sweep.py` (mục 2) để biết lỗi nằm ở nốt nhỏ, dương tính giả hay ngưỡng.
-
----
-
-## 1. Bảng tổng hợp vấn đề
-
-| ID | Vấn đề | Vị trí | Nguyên nhân | Ảnh hưởng tới kết quả | Mức | Sửa ở |
-|---|---|---|---|---|---|---|
-| P1 | Val 2D lạc quan hơn thực tế | `offline_builder.py` `build_dataset_index`, `configs/config.py` | 2081 lát u < 20 mm² (nốt nhỏ + lát biên nốt) bị loại khỏi cả train lẫn val; âm tính chỉ 22% (1321/6116), 75620 lát âm bị bỏ; ngưỡng 20 mm² và quantize 25 HU kế thừa DuneAI (u NSCLC lớn), không hợp nốt LIDC | Mô hình không học nốt nhỏ/lát biên; 3D Dice thật thấp hơn val 2D; dương tính giả nhiều khi chạy cả khối | Cao | §3.1, §5.2 |
-| P2 | Chưa đo 3D / theo nốt / P-R trong quá trình chọn model | `base_trainer.py`, `evaluate.py` | Chỉ log Dice gộp pixel; chọn best bằng val Dice 2D | Không biết lỗi do FP hay FN, nốt nhỏ hay lớn; ngưỡng 0.5 chưa chắc tối ưu (do `pos_weight=4`) | Cao | §2, §3.3 |
-| P3 | Lệch train ↔ val/inference ở mặt nạ phổi | `dataset.py` `__getitem__` (`lung_keep_mask`) | Train hợp mask phổi với mask u đã dilate; val/inference chỉ dùng mask phổi. Nốt dính màng phổi bị tách phổi bỏ sót → train thấy "đảo mô mềm quanh u" (lộ nhãn), val bị xóa mất một phần u | Gap train/val; nốt sát thành ngực bị cắt khi inference | Cao | §2 (kiểm tra), §3.2 |
-| P4 | Overfit (gap 0.13) | toàn pipeline | Ít nốt độc lập (5186 lát tương quan), aug chỉ flip/rot90, weight decay 1e-4 (vô hiệu), drop_path cố định 0.2 | Val dừng ở ~0.74 trong khi train → 0.87 | Cao | §3.4, §4, §5 |
-| P5 | Độ phân giải đầu ra thấp | `decoder.py` (`final_up`) | Feature mịn nhất H/4 (128×128), upsample bilinear ×4, không có skip H/2, H/1. 1 mm/pixel nên nốt 4 mm ≈ 1 pixel ở H/4 | Biên mờ, bỏ sót nốt nhỏ; trần Dice thấp | Cao | §6.1 |
-| P6 | Cửa sổ stage 3–4 bị pad + cô lập | `mamba_vision.py` `MambaVisionLayer`, `configs/config.py` | 512 → feature 32×32 (cửa sổ 14) pad lên 42×42; stage 4 16×16 (cửa sổ 7) pad lên 21×21; không trao đổi giữa các cửa sổ; aug không có dịch chuyển nên lưới cửa sổ luôn cố định so với ảnh | Tốn ~1.7× token ở stage 3–4; artefact ở biên cửa sổ; nốt nằm vắt qua biên cửa sổ | Trung bình | §5.3, §6.2 |
-| P7 | BN backbone không `eval()` khi đóng băng như spec | `base_trainer.run_epoch` gọi `model.train()` **sau** `on_epoch_start` | Hook đặt BN eval bị ghi đè | Thực tế BN vẫn cập nhật thống kê CT trong 3 epoch freeze (có thể có lợi!). Chỉ là sai spec | Thấp | §3.5 |
-| P8 | Weight decay vô hiệu và áp cả lên norm/bias/`A_log`/`D` | `trainer.build_param_groups`, `train_main.py` | AdamW wd=1e-4 ⇒ sau ~27k bước chỉ co trọng số ~0.03%; không dùng cờ `_no_weight_decay` | Gần như không có regularization | Trung bình | §3.4 |
-| P9 | Chuẩn hóa đầu vào lệch ImageNet | `model.py` | Đầu vào [0,1] từ cửa sổ HU, không mean/std; backbone pretrained quen RGB-ImageNet | Lệch miền không cần thiết (BN stem tự thích nghi một phần) | Thấp | §6.3 |
-| P10 | Khoảng cách z không chuẩn hóa | `dataset.py` `_neighbor_indices`, `volume_inference.py` | z±1 = 0.6 mm ở ca này, 3–5 mm ở ca khác | "Ngữ cảnh 2.5D" khác nghĩa vật lý giữa các ca | Thấp–TB | §5.4 |
-| P11 | Nội suy `nearest` khi resize 1 mm | `medical_prep.py` `IMAGE_INTERP` | Kế thừa tác giả; spacing LIDC 0.5–0.98 mm ⇒ đang *downsample*, nearest tạo răng cưa | Nhiễu trên nốt nhỏ | Thấp (tốn công rebuild) | §5.5 |
-| P12 | Chọn 500 ca đầu + chưa có test set | `runtime_data.select_patients` (`first`), `offline_builder` | Ca LIDC-IDRI đầu có thể thiên về vài máy/độ dày lát; model chọn bằng val rồi báo cáo luôn val | Thiên lệch chọn mẫu; best_val_dice lạc quan nhẹ | Trung bình | §5.6 |
-| P13 | Val nhiễu, không dùng trung bình trọng số | `base_trainer.fit` | 75 ca val ⇒ dao động ±0.005–0.01/epoch; không EMA | "Best epoch" ngẫu nhiên; kết quả kém ổn định | Trung bình | §5.1 |
-| P14 | Lỗi/bất nhất nhỏ | xem §3.6 | — | Gây hiểu nhầm | Thấp | §3.6 |
+> [!IMPORTANT]
+> **Quy ước kỹ thuật**:
+> 1. Mọi tính năng mở rộng bên dưới đều có **giá trị mặc định = hành vi hiện tại** (cờ mới mặc định tắt) để tuyệt đối không phá vỡ kiểm thử hồi quy và các checkpoint cũ.
+> 2. Tuân thủ nghiêm ngặt **Quy tắc Kiến trúc Rule R1**: Giữ nguyên vẹn mã nguồn chuẩn trong `unet_base/` và tệp gốc `mamba_unet/decoder.py`. Mọi mở rộng kiến trúc (nhánh Skip độ nét cao `--hr-skip`) được thiết kế qua cờ `high_res_skip=False` hoặc module kế thừa.
+> 3. Cột "Kỳ vọng" của các phiên chạy thực nghiệm được chuẩn hóa thành **"Tiêu chí quyết định (Decision Rule)"** dựa trên độ tin cậy thống kê $95\%$ ($\text{CI}_{95\%}$).
 
 ---
 
-## 2. BƯỚC 0 — Đo lường (làm trước, không cần train lại)
+## 0. TÓM TẮT ĐIỀU HÀNH & BẰNG CHỨNG THỰC NGHIỆM BƯỚC 0
 
-### 2.1 Tạo `tools/eval_sweep.py`: quét ngưỡng + đánh giá 3D theo từng nốt
+1. **Thực trạng chênh lệch giữa 2D và 3D**:
+   * Trên các lát cắt 2D chọn lọc (`slices.csv`), mô hình đạt điểm số rất cao: $\text{Train Dice}_{2D} = 0.8701$, $\text{Val Dice}_{2D} = 0.7456$ (khoảng cách overfit $\approx 12.45\%\text{--}13.07\%$).
+   * Tuy nhiên, khi suy luận trượt toàn khối 3D trên $75$ bệnh nhân Validation ($203$ nốt u Ground Truth), $\text{Mean Dice}_{3D}$ sụt giảm xuống mức **$0.3768$** ($Th = 0.5$) và đạt cực đại **$0.3771$** ($Th = 0.6$, độ lệch chuẩn $\text{SD} = 0.349$, sai số chuẩn $\text{SE} = 0.040$, khoảng tin cậy $95\%$ $\text{CI} = \pm 0.079$).
 
-Trả lời các câu hỏi: ngưỡng tốt nhất là bao nhiêu? bao nhiêu dương tính giả mỗi ca? độ nhạy theo kích thước nốt?
+2. **Bóc tách 3 nút thắt cốt lõi từ số liệu Bước 0**:
+   * **Nút thắt 1 — Mù nốt nhỏ do "Bờ vực $20\text{ mm}^2$" (P1 & P15)**:
+     * Toàn bộ $59/203$ nốt u ($29.06\%$) có đường kính $d < 5.0\text{ mm}$ ($A_{\max} < 19.63\text{ mm}^2$) bị loại sạch khỏi tập train bởi ngưỡng `TUMOR_SIZE_LOW_LIM = 20.0`.
+     * Khi đánh giá 3D, độ nhạy của dải này chỉ đạt **$3.39\%$ ($2/59$ nốt)**.
+     * Quy định *"giữ $20\text{ mm}^2$ ở hậu xử lý"* của Plan cũ đã vô tình chặn cứng trần độ nhạy tối đa của toàn hệ thống ở mức $(203 - 59) / 203 = \mathbf{70.94\%}$.
+   * **Nút thắt 2 — Báo động giả do thiếu mẫu âm tính & phạt 4x ở hàm loss (P2 & P16)**:
+     * Lúc train, mô hình chỉ được học vỏn vẹn **$1.72\%$** số lát âm tính ($1,321 / 76,941$ lát âm có phổi).
+     * Kết hợp với `pos_weight = 4.0` đẩy điểm cân bằng xác suất Bayes về $p^* = 0.20$, mô hình bị bão hòa xác suất (Overconfident Logits): quét ngưỡng từ $0.3$ lên $0.7$ mà dương tính giả hầu như không giảm ($3.24 \rightarrow 2.80\text{ FP/ca}$).
+     * Hậu quả: $8/11$ ca không có u ($n_{\text{gt}} = 0$) bị dính $1\text{--}10$ cụm FP ($3.63\text{ FP/ca}$), nhận $\text{Dice}_{3D} = 0.0000$ (kéo tụt $\text{Mean Dice}$ toàn tập mất $0.1067$).
+   * **Nút thắt 3 — Kiến trúc thiếu chi tiết biên cho nốt nhỏ (P5)**:
+     * Decoder hiện tại đưa đặc trưng mịn nhất ở tầng $H/4$ ($1\text{ px} = 4\text{ mm}$) rồi nội suy song tuyến tính $\times 4$. Nốt u đường kính $4\text{ mm}$ chỉ chiếm chưa đầy $1\text{ pixel}$ ở tầng $H/4$ trước khi upsample.
+     * Trong khi đó, nốt trung bình ($10\text{--}20\text{ mm}$) đã đạt độ nhạy **$83.78\%$** ($31/37$) và nốt lớn ($\ge 20\text{ mm}$) đạt **$100.0\%$** ($8/8$). Lỗi hoàn toàn tập trung ở nốt nhỏ $< 8\text{ mm}$.
+
+3. **Hai phát hiện giải phóng hiệu năng**:
+   * **Mặt nạ phổi (P3) không phải điểm nghẽn**: $95\%$ bệnh nhân bảo toàn $\ge 99.4\%$ thể tích u ($p_5 = 0.994$, $\text{Median} = 1.000$). Cả 5 ca xấu nhất đều nằm ở tập Train. Hủy bỏ phiên chạy R5 cũ để tiết kiệm GPU.
+   * **Kích thước ảnh $448 \times 448$ an toàn $100\%$**: $0/449$ ca bị mất nhãn nốt u khi cắt tâm $448$. Giảm $2.25\times$ token Stage 3 ($1,764 \rightarrow 784$), rút ngắn thời gian mỗi epoch $\sim 25\%$ (từ $5\text{m}16\text{s}$ xuống $\sim 3\text{m}50\text{s}$).
+
+---
+
+## 1. BẢNG PHÂN TÍCH VẤN ĐỀ TOÀN DIỆN (P1 $\rightarrow$ P17)
+
+Bảng tổng hợp đã được cập nhật lại mức độ ưu tiên và các vấn đề mới phát hiện sau Bước 0:
+
+| ID | Vấn đề cốt lõi | Vị trí trong Code | Nguyên nhân kỹ thuật | Ảnh hưởng thực tế từ Bước 0 | Mức độ ưu tiên | Mục khắc phục |
+|:---:|:---|:---|:---|:---|:---:|:---:|
+| **P1** | **Mù nốt nhỏ $< 5\text{ mm}$ lúc train** | `offline_builder.py` | Ngưỡng diện tích `TUMOR_SIZE_LOW_LIM = 20.0` loại bỏ 2,081 lát u nhỏ. | $57/59$ nốt $< 5\text{ mm}$ bị bỏ sót ($96.61\%$). | **RẤT CAO** | §3.1 |
+| **P15** | **Bộ lọc hậu xử lý chặn trần độ nhạy** | `postprocess3d.py`, `eval_sweep.py` | Hậu xử lý mặc định lọc bỏ cụm có diện tích lát $< 20\text{ mm}^2$. | Khóa cứng trần độ nhạy toàn hệ thống ở mức $70.94\%$. | **RẤT CAO** | §3.1, §2.3 |
+| **P16** | **Thiếu hụt trầm trọng mẫu âm tính** | `offline_builder.py` | Chỉ dùng $1.72\%$ lát âm tính; ca không u chỉ lấy đúng 1 lát âm tính. | $8/11$ ca rỗng bị nhận diện nhầm, trung bình $2.91\text{ FP/ca}$. | **RẤT CAO** | §3.1b |
+| **P2** | **Bão hòa Logits do phạt 4x ở Loss** | `train_main.py` | `pos_weight = 4.0` phạt lỗi FN nặng gấp 4 lần FP, Bayes threshold $p^* = 0.20$. | FP không giảm dù tăng ngưỡng lên $Th = 0.7$; kéo tụt Precision. | **CAO** | §4 |
+| **P4** | **Overfitting lớn (Gap $13\%$)** | Toàn pipeline | `weight_decay = 1e-4` vô hiệu; Augmentation chỉ có flip/rot90. | $\text{Train Dice} = 0.8701$ trong khi $\text{Val Dice} = 0.7456$. | **CAO** | §3.4, §5.1, §5.2 |
+| **P5** | **Mờ biên nốt nhỏ ở Decoder** | `decoder.py` | Feature mịn nhất $H/4$ ($128 \times 128$), sau đó phóng đại song tuyến tính $\times 4$. | Nốt nhỏ $< 8\text{ mm}$ bị nhòe biên, Dice 3D không bứt phá. | **CAO** | §6.1 |
+| **P6** | **Lãng phí token padding Stage 3–4** | `mamba_vision.py` | Ảnh $512$ không chia hết cho cửa sổ $14$ và $7$; Stage 3 bị đệm lên 1,764 tokens. | Tốn bộ nhớ GPU và chậm hơn $25\%$ thời gian tính toán. | **TRUNG BÌNH** | §5.3 |
+| **P17** | **Mất điểm Dice ở ca không u** | `metrics3d.py` | Khi $\text{GT} = 0$, chỉ cần xuất hiện 1 cụm FP là $\text{Dice} = 0.0$ lập tức. | 8 ca không u làm mất $0.1067$ điểm Mean Dice của cả tập. | **TRUNG BÌNH** | §2.1, §8 |
+| **P8** | **Weight decay sai nhóm tham số** | `trainer.py` | Áp dụng co trọng số lên cả Bias, LayerNorm, BatchNorm, $A_{\log}, D$. | Làm mất cân bằng thang đo đặc trưng của Mamba SSM. | **TRUNG BÌNH** | §3.4 |
+| **P13** | **Val Dice dao động nhiễu giữa các epoch** | `base_trainer.py` | 75 ca val làm Dice dao động $\pm 0.01$/epoch; chưa có trọng số EMA. | Checkpoint chọn ra bị phụ thuộc vào may rủi của từng epoch. | **TRUNG BÌNH** | §5.1 |
+| **P3** | **Lệch mặt nạ phổi giữa Train và Val** | `dataset.py` | Train hợp mask u vào phổi; Val chỉ dùng mask phổi gốc. | **Không nghiêm trọng**: $95\%$ ca giữ $\ge 99.4\%$ u; cả 5 ca xấu ở Train. | **THẤP** *(Hạ mức)* | §3.2 |
+| **P7** | **BN backbone không eval khi đóng băng** | `base_trainer.py` | Hook đặt BN eval bị `model.train()` ghi đè. | Thực tế BN thích nghi thống kê CT lại có lợi nhẹ. | **THẤP** | §3.5 |
+| **P9** | **Chuẩn hóa đầu vào lệch ImageNet** | `model.py` | Đầu vào $[0, 1]$ từ HU clip, không trừ mean/std. | BN tầng đầu thích nghi được một phần. | **THẤP** | §6.3 |
+| **P10**| **Khoảng cách trục z chưa chuẩn hóa** | `dataset.py` | Lát cắt $z \pm 1$ có độ dày vật lý khác nhau giữa các ca. | Ảnh hưởng nhẹ tới tính nhất quán không gian 2.5D. | **THẤP** | §5.4 |
+| **P11**| **Nội suy Nearest khi làm cache 1mm** | `medical_prep.py` | Spacing gốc $0.5\text{--}0.9\text{ mm}$ bị downsample bằng nearest. | Tốn nhiều công rebuild cache, mức cải thiện nhỏ. | **THẤP** | §5.5 |
+| **P12**| **Thiếu tập Test độc lập** | `offline_builder.py` | Mô hình chọn bằng Val rồi báo cáo luôn trên Val. | Có thể gây lạc quan nhẹ về kết quả chung cuộc. | **TRUNG BÌNH** | §5.6 |
+| **P14**| **Bất nhất nhỏ về tài liệu và docstring** | Toàn repo | Một số docstring ghi sai số lượng keys hoặc sai đơn vị. | Không ảnh hưởng đến chất lượng huấn luyện. | **THẤP** | §3.6 |
+
+---
+
+## 2. KẾT QUẢ ĐO LƯỜNG BƯỚC 0 & ĐÁNH GIÁ ĐỐI CHỨNG $R_{0b}$
+
+### 2.1 Bảng kết quả thực nghiệm cơ sở ($R_0$ Baseline)
+Đo lường trên toàn bộ $75$ bệnh nhân tập Validation ($203$ nốt u Ground Truth) qua lệnh:
+```bash
+DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep.py \
+  --cache-dir /content/data/cache_1mm \
+  --checkpoint mamba_unet/runs/mamba_colab_500item_25epoch_extra_test/best_model.pth \
+  --split val --thresholds 0.3 0.4 0.5 0.6 0.7 --min-area 20.0 --out-prefix sweep_r0
+```
+
+* **Hiệu năng 3D theo ngưỡng xác suất**:
+  * $Th = 0.5$ (Mặc định): $\text{Dice}_{3D} = \mathbf{0.3768}$ | $\text{Precision} = 0.4117$ | $\text{Recall} = 0.4039$ | $\text{FP/ca} = 2.97$
+  * $Th = 0.6$ (Tối ưu) ⭐: $\text{Dice}_{3D} = \mathbf{0.3771}$ | $\text{Precision} = 0.4143$ | $\text{Recall} = 0.4021$ | $\text{FP/ca} = 2.91$
+* **Độ nhạy phát hiện nốt u theo đường kính ($Th = 0.6$)**:
+  * $\ge 20.0\text{ mm}$ (Lớn): **$100.0\%$** ($8/8$ nốt).
+  * $10.0 - 20.0\text{ mm}$ (Trung bình): **$83.78\%$** ($31/37$ nốt).
+  * $5.0 - 10.0\text{ mm}$ (Nhỏ): **$57.58\%$** ($57/99$ nốt) — *trong đó dải $5.0\text{--}6.0\text{ mm}$ chỉ đạt $25.93\%$*.
+  * $< 5.0\text{ mm}$ (Rất nhỏ): **$3.39\%$** ($2/59$ nốt) — **$96.61\%$ bị bỏ sót hoàn toàn**.
+
+---
+
+### 2.2 Bước chuẩn bị cần thiết: Đánh giá đối chứng $R_{0b}$ (Chạy ngay, không train)
+
+> [!NOTE]
+> **Mục đích của $R_{0b}$**:
+> Trước khi huấn luyện Run 1 với bộ lọc mới ($6.0\text{ mm}^2$ và lọc thể tích $V_{\min}$), ta cần đo xem checkpoint $R_0$ cũ dưới **cùng bộ lọc mới** sẽ đạt điểm số bao nhiêu. Điều này đảm bảo khi so sánh $R_1$ với $R_0$, kết quả phản ánh sự tiến bộ thực sự của mô hình học máy chứ không phải do thay đổi bộ lọc hậu xử lý.
+
+Lệnh thực thi trên Colab (chỉ mất $\sim 3\text{--}5$ phút):
+```bash
+DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+  --cache-dir /content/data/cache_1mm \
+  --checkpoint mamba_unet/runs/mamba_colab_500item_25epoch_extra_test/best_model.pth \
+  --split val --thresholds 0.5 0.6 0.7 --min-areas 6.0 10.0 20.0 --min-vols 0 10 20 \
+  --out-prefix sweep_r0b
+```
+*(Mã nguồn script `tools/eval_sweep_v2.py` được cung cấp chi tiết tại **Phụ lục A**).*
+
+---
+
+## 3. CÁC GIẢI PHÁP KỸ THUẬT CỐT LÕI (DỮ LIỆU & TỐI ƯU HÓA)
+
+### 3.1 [P1 & P15] Đồng bộ hóa ngưỡng diện tích: Train $5.0\text{ mm}^2$ và Hậu xử lý $6.0\text{ mm}^2$
+
+1. **Trong `common/engine/cli_args.py`**:
+   Thêm cờ cấu hình dữ liệu vào `data_group`:
+   ```python
+   data_group.add_argument("--min-train-area", type=float, default=20.0,
+                           help="Ngưỡng diện tích u tối thiểu (mm²) khi dựng slices.csv (khuyến nghị: 5.0)")
+   data_group.add_argument("--neg-ratio", type=float, default=0.25,
+                           help="Tỷ lệ mẫu âm tính trên lát dương tính (khuyến nghị: 0.5)")
+   data_group.add_argument("--min-neg-per-case", type=int, default=4,
+                           help="Ngưỡng sàn số lát âm tính tối thiểu cho mọi ca bệnh")
+   ```
+
+2. **Trong `common/data_pipeline/offline_builder.py`**:
+   Sửa hàm `build_dataset_index` để đồng bộ ngưỡng $5.0\text{ mm}^2$ và xóa bỏ hoàn toàn quy ước *"giữ $20\text{ mm}^2$ ở hậu xử lý"*:
+   * $A < 5.0\text{ mm}^2$: Loại bỏ (lọc bỏ nhiễu nhãn 1–4 pixel không đồng thuận giữa các bác sĩ).
+   * $A \ge 5.0\text{ mm}^2$: Giữ lại tập train ($191/203$ nốt u thực tế bảo toàn $\ge 3\text{ mm}$).
+   * Ở hậu xử lý: Đặt `min_slice_area_mm2 = 6.0` kết hợp `min_slices_span = 2` (hoặc `min_volume_mm3 = 10.0`) trong `postprocess_3d_mask`.
+
+---
+
+### 3.1b [P16] Bộ lấy mẫu âm tính động mỗi Epoch (`PosAllNegResample`) & Vá lỗi ca không u
+
+1. **Vá lỗi ca không có khối u trong `offline_builder.py`**:
+   Thay vì gán cứng bằng 1 lát đơn độc, áp dụng ngưỡng sàn `min_neg_per_case`:
+   ```python
+   # Cân bằng lát cắt âm tính theo tỷ lệ và ngưỡng sàn
+   if len(pos_slices) > 0:
+       num_neg_keep = max(min_neg_per_case, int(round(len(pos_slices) * zero_sl_ratio)))
+   else:
+       # Ca không u (n_gt = 0) được đóng góp số lát âm tính tương đương ngưỡng sàn
+       num_neg_keep = min_neg_per_case
+   num_neg_keep = min(len(neg_candidates), num_neg_keep)
+   ```
+
+2. **Tích hợp PyTorch Sampler động (`PosAllNegResample`) trong `dataset.py`**:
+   * **Bản chất**: Thay vì cố định $1,321$ lát âm tính suốt 40 epoch, mỗi epoch DataLoader sẽ bốc ngẫu nhiên một tập lát âm tính khác nhau từ kho ứng viên.
+   * **Hiệu quả**: Mô hình tiếp cận được **$81.2\%$** kho dữ liệu âm tính sau 40 epoch mà thời gian huấn luyện mỗi epoch không hề tăng.
+   *(Chi tiết mã nguồn Sampler xem tại **Phụ lục B**).*
+
+---
+
+### 3.2 [P3] Đồng nhất mặt nạ phổi & Sửa lỗi logic nhãn (Hủy bỏ Run R5)
+
+1. **Hủy bỏ Run R5 (`--tumor-union-p 0.0`)**: Do Bước 0 chứng minh P3 không phải nguyên nhân gây sụt giảm điểm số trên tập Validation.
+2. **Sửa lỗi logic nhãn trong `common/data_pipeline/dataset.py`**:
+   Đảm bảo nếu không hợp mask u vào mask phổi (`use_union = False`) thì phần nhãn Ground Truth bị mặt nạ phổi che mất cũng phải được xóa đồng bộ để tránh ép mạng học nốt u trên nền không khí $-1000\text{ HU}$:
+   ```python
+   if use_lung:
+       img_stack, msk_stack, lung_stack = loaded
+       use_union = (self.split == "train") and (random.random() < self.tumor_union_p)
+       tumor_for_keep = msk_stack if use_union else None
+       keep = lung_keep_mask(lung_stack, tumor_mask=tumor_for_keep)
+       img_stack = apply_lung_mask(img_stack, keep, fill=HU_FLOOR)
+       if not use_union:
+           # Đồng bộ nhãn với vùng phổi giữ lại để tránh nhiễu loạn gradient
+           msk_stack = msk_stack & (keep > 0).astype(msk_stack.dtype)
+   ```
+
+---
+
+### 3.4 [P4 & P8] Tối ưu hóa suy giảm trọng số (`weight_decay = 0.02` với 4 nhóm tham số)
+
+Trong `mamba_unet/trainer.py`, hàm `build_param_groups` được phân tách thành 4 nhóm chuẩn hóa:
+1. `backbone_decay`: Trọng số Conv2d/Linear của MambaVision (áp dụng LR backbone và `weight_decay = 0.02`).
+2. `backbone_no_decay`: Bias, BatchNorm, LayerNorm, $A_{\log}, D$ của MambaVision (không co trọng số, `weight_decay = 0.0`).
+3. `decoder_decay`: Trọng số Conv2d của Decoder (áp dụng Base LR và `weight_decay = 0.02`).
+4. `decoder_no_decay`: Bias, Norm của Decoder (`weight_decay = 0.0`).
+
+* **Mức độ co trọng số thực tế**: Sau 40 epochs ($\approx 25,000$ bước cập nhật), trọng số được co nhẹ $2.7\%\text{--}5.3\%$, vừa đủ để chống overfitting mà không làm suy yếu khả năng trích xuất đặc trưng.
+
+---
+
+## 4. HÀM MẤT MÁT & CẤU HÌNH HUẤN LUYỆN CHUẨN HÓA
+
+* **Hạ `pos_weight` xuống 2.0**:
+  Cân bằng lại tỷ trọng phạt trong hàm mất mát kết hợp `dice_bce`:
+  ```bash
+  --loss dice_bce --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 2.0}'
+  ```
+  Giúp dịch chuyển ngưỡng xác suất tối ưu Bayes từ $0.20$ về $0.33$, triệt tiêu các đốm dự đoán dương tính giả bão hòa ở mức $> 0.7$.
+* **Cấu hình tối ưu hóa hội tụ an toàn**:
+  * Duy trì `--epochs 40 --patience 10` cho mọi phiên chạy (tránh dừng sớm khi mạng đang co cụm trọng số với `wd = 0.02`).
+  * Giữ cố định `--batch-size 8` và `--lr 0.0001` ở các run đầu để không làm nhiễu kiểm soát biến thực nghiệm.
+
+---
+
+## 5. CÁC KỸ THUẬT TỐI ƯU HÓA BỔ TRỢ
+
+### 5.1 [P13] Làm mượt trọng số bằng Exponential Moving Average (`--ema 0.999`)
+* Cập nhật trọng số trượt: $\theta_{\text{EMA}} \leftarrow 0.999 \times \theta_{\text{EMA}} + 0.001 \times \theta_t$.
+* Tương đương trung bình hóa trọng số qua $\approx 1,000$ bước cập nhật ($\approx 1.5$ epoch), giúp checkpoint `best_model.pth` có tính bền vững cao, triệt tiêu dao động $\pm 0.01$ Dice giữa các epoch.
+
+### 5.2 [P4] Tăng cường dữ liệu nâng cao (`--aug-level 2`)
+* Mở rộng thêm các phép biến đổi không gian ngẫu nhiên: Xoay $\pm 15^\circ$, Co giãn $0.85\text{--}1.15$, Tịnh tiến ngẫu nhiên $\pm 32\text{ px}$, kết hợp nhiễu Gaussian và biến thiên tương phản.
+* Giúp phá vỡ tính cố định của lưới cửa sổ Stage 3–4 so với ảnh chụp.
+
+### 5.3 [P6] Chuẩn hóa kích thước ảnh `DUNEAI_IMAGE_SIZE=448`
+* Stage 3 đạt kích thước $28 \times 28$ (vừa khít $2 \times 2$ cửa sổ $14$, giảm token từ $1,764$ xuống $784$).
+* Lưu khóa `"image_size": IMAGE_SIZE` vào `checkpoint_meta` trong `trainer.py` để các công cụ suy luận tự động thích ứng đúng kích thước.
+
+---
+
+## 6. CẢI TIẾN KIẾN TRÚC: NHÁNH SKIP ĐỘ PHÂN GIẢI CAO (`--hr-skip`)
+
+Mục tiêu sửa dứt điểm **P5** mà vẫn tuân thủ nghiêm ngặt **Quy tắc Rule R1**:
+
+```mermaid
+flowchart TD
+    In["Input CT (B, 3, H, W)"] --> Stem["Backbone Stem"]
+    In --> HR_Stem["hr_stem: DoubleConv(3 -> 16, H, W)"]
+    Stem --> F0["Stem Feature (H/2, W/2, 32ch)"]
+    Stem --> Stage1["Stages 1-4 (Backbone MambaVision)"]
+    Stage1 --> F4["Bottleneck F4 (H/32)"]
+    F4 --> Up1["UpBlock (H/16)"]
+    Up1 --> Up2["UpBlock (H/8)"]
+    Up2 --> Up3["UpBlock (H/4)"]
+    Up3 --> Up4["up4: UpBlock (H/4 -> H/2, ghép F0)"]
+    Up4 --> Up5["up5: UpBlock (H/2 -> H/1, ghép hr_stem)"]
+    Up5 --> Out["outc: Conv2d(16 -> 1, H, W)"]
+```
+
+* **Thiết kế an toàn**: Tham số `high_res_skip: bool = False` (mặc định tắt hoàn toàn).
+* **Bảo tồn nguyên trạng**: Khi cờ tắt, mô hình chạy qua nhánh `final_up` tiêu chuẩn. Khi bật cờ, mạng kích hoạt `up4` và `up5` để khôi phục chi tiết biên cho nốt nhỏ $< 8\text{ mm}$.
+* **Huấn luyện**: Khởi tạo từ trọng số ImageNet chuẩn để đảm bảo tính khách quan của phép thử phân rã.
+
+---
+
+## 7. SƠ ĐỒ ĐƯỜNG ĐI THỰC HIỆN THEO MỨC ĐỘ ƯU TIÊN (PRIORITY ROADMAP)
+
+Dưới đây là sơ đồ trực quan hướng dẫn trình tự các công việc kỹ thuật cần tiến hành từ khâu chuẩn bị đến khâu nghiệm thu:
+
+```mermaid
+flowchart TD
+    subgraph P0["ƯU TIÊN 0: Đo Lường Đối Chứng (Không tốn GPU train)"]
+        A1["Tạo tools/eval_sweep_v2.py (Phụ lục A)"] --> A2["Chạy R0b trên 75 ca Val hiện tại"]
+        A2 --> A3["Chốt điểm đối chứng R0b (min-area=6.0, V_min=10)"]
+    end
+
+    subgraph P1["ƯU TIÊN 1: Sửa Bản Chất Dữ Liệu & Hàm Loss (Run 1)"]
+        B1["Sửa offline_builder.py: min-train-area=5.0, vá ca không u"] --> B2["Tích hợp PosAllNegResample vào DataLoader (Phụ lục B)"]
+        B2 --> B3["Đặt DUNEAI_IMAGE_SIZE=448 & pos_weight=2.0"]
+        B3 --> B4["Train Run 1 (R1_Data_Loss)"]
+        B4 --> B5["Đánh giá R1 bằng eval_sweep_v2 so với R0b"]
+    end
+
+    subgraph P2["ƯU TIÊN 2: Chống Overfitting & Ổn Định Trọng Số (Run 2)"]
+        C1["Kích hoạt weight_decay=0.02 (4 nhóm param)"] --> C2["Tích hợp EMA=0.999 & --aug-level 2"]
+        C2 --> C3["Train Run 2 (R2_Regularization)"]
+        C3 --> C4["Kiểm tra thu hẹp Gap Overfit 13%"]
+    end
+
+    subgraph P3["ƯU TIÊN 3: Bứt Phá Biên Nốt Nhỏ Bằng Kiến Trúc (Run 3)"]
+        D1["Tích hợp --hr-skip vào mamba_vision và decoder"] --> D2["Kiểm tra hồi quy strict=True"]
+        D2 --> D3["Train Run 3 (R3_Architecture_HR_Skip)"]
+        D3 --> D4["Đo lường độ nhạy nốt nhỏ < 5mm và < 10mm"]
+    end
+
+    subgraph P4["ƯU TIÊN 4: Nghiệm Thu Chung Cuộc (Run 4)"]
+        E1["Giải nén toàn bộ 1,010 ca LIDC-IDRI"] --> E2["Tách 10% Test độc lập (101 ca)"]
+        E2 --> E3["Train Run 4 (R4_Final_1010) với cấu hình tối ưu"]
+        E3 --> E4["Báo cáo kết quả cuối cùng cho Đồ án CT208E"]
+    end
+
+    P0 --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+```
+
+---
+
+## 8. HƯỚNG DẪN THỰC THI CHI TIẾT THEO TỪNG GIAI ĐOẠN RUN (STEP-BY-STEP PLAYBOOK)
+
+Mục này cung cấp hướng dẫn thao tác cụ thể cho từng giai đoạn: **sửa cái gì, cải tiến cái gì, làm ở đâu, vị trí mã nguồn nào và cách sửa như thế nào**.
+
+```
+                           ┌─────────────────────────────────────────────────────────┐
+                           │          LỘ TRÌNH 5 GIAI ĐOẠN TRIỂN KHAI                │
+                           └─────────────────────────────────────────────────────────┘
+                                                        │
+   ┌───────────────────────┐                            ▼
+   │  GIAI ĐOẠN 0: Run 0b  │ ──► Đo đối chứng bộ lọc mới (6 mm², V_min=10) trên Checkpoint R0 cũ
+   └───────────────────────┘                            │
+                                                        ▼
+   ┌───────────────────────┐
+   │  GIAI ĐOẠN 1: Run 1   │ ──► Dữ liệu & Loss: DUNEAI_IMAGE_SIZE=448, min-area 5.0,
+   │    (R1_Data_Loss)     │     Sampler động PosAllNegResample, vá ca rỗng, pos_weight=2.0
+   └───────────────────────┘                            │
+                                                        ▼
+   ┌───────────────────────┐
+   │  GIAI ĐOẠN 2: Run 2   │ ──► Regularization: weight_decay=0.02 (4 nhóm param),
+   │  (R2_Regularization)  │     EMA=0.999, Augmentation cấp 2 (--aug-level 2)
+   └───────────────────────┘                            │
+                                                        ▼
+   ┌───────────────────────┐
+   │  GIAI ĐOẠN 3: Run 3   │ ──► Kiến trúc mạng: Nhánh Skip độ nét cao (--hr-skip)
+   │  (R3_Architecture)    │     nối tắt H/2 và H/1 vào Decoder cứu nốt u nhỏ
+   └───────────────────────┘                            │
+                                                        ▼
+   ┌───────────────────────┐
+   │  GIAI ĐOẠN 4: Run 4   │ ──► Nghiệm thu: Toàn bộ 1,010 ca LIDC-IDRI,
+   │    (R4_Final_1010)    │     tách riêng 10% Test độc lập (101 ca), xuất báo cáo CT208E
+   └───────────────────────┘
+```
+
+---
+
+### BẢNG THEO DÕI TIẾN ĐỘ THỰC HIỆN TỔNG THỂ (MASTER PROGRESS CHECKLIST)
+
+Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình trạng thực thi qua từng giai đoạn:
+
+| Giai đoạn | Nội dung trọng tâm | Trạng thái | Tiến độ hoàn thành |
+| :--- | :--- | :---: | :---: |
+| **Run 0 ($R_0$)** | Baseline đo lường cơ sở trên 75 ca Val | **ĐÃ XONG** | `[x]` **100%** (Đã đo xong 3D: Dice 0.3771) |
+| **Run 0b ($R_{0b}$)** | Đo đối chứng với bộ lọc mới ($6\text{ mm}^2, V_{\min}=10$) | **ĐANG TRIỂN KHAI** | `[ ]` **1/4 mục** (Đã tạo `tools/eval_sweep_v2.py` & cập nhật notebook Colab) |
+| **Run 1 (`R1_Data_Loss`)** | Dữ liệu u nhỏ 5.0, Sampler động, pos_weight 2.0, ảnh 448 | **CHỜ TRIỂN KHAI** | `[ ]` **0/11 mục** |
+| **Run 2 (`R2_Regularization`)** | Weight Decay 0.02 (4 nhóm), EMA 0.999, Augment cấp 2 | **CHƯA BẮT ĐẦU** | `[ ]` **0/8 mục** |
+| **Run 3 (`R3_HR_Skip`)** | Nhánh Skip độ nét cao $H/2, H/1$ vào Decoder cứu nốt nhỏ | **CHƯA BẮT ĐẦU** | `[ ]` **0/8 mục** |
+| **Run 4 (`R4_Final_1010`)** | Toàn bộ 1,010 ca, tách 10% Test độc lập, nghiệm thu đồ án | **CHƯA BẮT ĐẦU** | `[ ]` **0/7 mục** |
+
+---
+
+### 8.0 Giai đoạn 0: Đánh Giá Đối Chứng Chuẩn Tắc (Run 0b — Không Train)
+
+* **Sửa / Cải tiến cái gì**:
+  Tạo công cụ quét lưới 3 tham số ($Th \times A_{\min} \times V_{\min}$) để đo đạc lại checkpoint $R_0$ cũ dưới bộ lọc mới ($A_{\min}=6.0\text{ mm}^2, V_{\min}=10\text{ mm}^3$), tạo điểm quy chiếu độc lập cho Run 1.
+* **Làm ở đâu**: Tạo mới tệp [`tools/eval_sweep_v2.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/tools/eval_sweep_v2.py).
+* **Vị trí mã nguồn & Cách làm**:
+  * Sao chép mã nguồn đã được chuẩn hóa tại **Phụ lục A** vào tệp `tools/eval_sweep_v2.py`.
+  * Logic chính: Nạp mô hình qua `load_mamba_unet_model`, dự đoán thể tích qua `predict_patient_volume`, áp dụng bộ lọc `postprocess_3d_mask` với các ngưỡng diện tích lát `min-areas` ($6, 10, 20\text{ mm}^2$) và thể tích khối `min-vols` ($0, 10, 20\text{ mm}^3$).
+* **Lệnh thực thi trên Google Colab**:
+  ```bash
+  DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+    --cache-dir /content/data/cache_1mm \
+    --checkpoint mamba_unet/runs/mamba_colab_500item_25epoch_extra_test/best_model.pth \
+    --split val \
+    --thresholds 0.5 0.6 0.7 \
+    --min-areas 6.0 10.0 20.0 \
+    --min-vols 0 10 20 \
+    --out-prefix sweep_r0b
+  ```
+* **Đầu ra & Tiêu chí nghiệm thu**:
+  * Sinh ra 2 tệp: `sweep_r0b_patients.csv` (chỉ số theo 75 ca val) và `sweep_r0b_nodules.csv` (kết quả bắt 203 nốt u).
+  * Ghi nhận mốc $\text{Dice}_{3D}$, $\text{FP/ca}$ và độ nhạy nốt $< 5\text{ mm}$ tại cấu hình $(Th=0.6, A_{\min}=6.0, V_{\min}=10)$ để so sánh trực tiếp với Run 1.
+* **Checklist công việc Giai đoạn 0 (Run 0b)**:
+  - [x] Tạo mới tệp `tools/eval_sweep_v2.py` từ mã nguồn Phụ lục A (và tích hợp cell chạy Run 0b vào [`colab_step0_measurement.ipynb`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/notebooks/colab_step0_measurement.ipynb)).
+  - [ ] Chạy lệnh quét lưới đối chứng đa ngưỡng trên Colab cho checkpoint $R_0$.
+  - [ ] Tải về và lưu trữ 2 tệp kết quả: `sweep_r0b_patients.csv` và `sweep_r0b_nodules.csv`.
+  - [ ] Chốt số liệu cơ sở tại cấu hình $(Th=0.6, A_{\min}=6.0, V_{\min}=10)$ làm mốc đối chuẩn cho Run 1.
+
+---
+
+### 8.1 Giai đoạn 1: Sửa Bản Chất Dữ Liệu & Hàm Mất Mát (Run 1 — `R1_Data_Loss`)
+
+* **Sửa / Cải tiến cái gì**:
+  1. Giảm kích thước ảnh từ $512$ xuống $448$ (`DUNEAI_IMAGE_SIZE=448`) để vừa khít cửa sổ MambaVision Stage 3 ($28 \times 28$), giảm $2.25\times$ token, tăng tốc train $\sim 25\%$ mà không mất nhãn.
+  2. Hạ ngưỡng diện tích nốt u khi lập chỉ mục từ $20.0\text{ mm}^2$ xuống $5.0\text{ mm}^2$ (sửa P1, khôi phục $191/203$ nốt u nhỏ).
+  3. Tích hợp bộ lấy mẫu âm tính động mỗi Epoch `PosAllNegResample` với tỷ lệ `--neg-ratio 0.5` (sửa P16, tiếp cận $81.2\%$ mẫu âm).
+  4. Vá lỗi ca không có khối u ($n_{\text{gt}}=0$): cấp sàn `--min-neg-per-case 4` lát âm tính (sửa P16, P17).
+  5. Sửa lỗi nhãn nốt u khi không dùng union phổi: `msk_stack & (keep > 0)` (sửa P3).
+  6. Hạ phạt dương tính giả: `pos_weight = 2.0` (sửa P2, dịch chuyển ngưỡng Bayes từ $0.20 \rightarrow 0.33$).
+* **Vị trí mã nguồn chi tiết & Cách sửa**:
+
+  1. **Vị trí 1.1 — Biến môi trường kích thước ảnh**:
+     * Tệp: [`configs/config.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/configs/config.py#L12)
+     * Thao tác: Cho phép cấu hình qua biến môi trường để linh hoạt chuyển đổi giữa 512 và 448:
+       ```python
+       IMAGE_SIZE = int(os.environ.get("DUNEAI_IMAGE_SIZE", 512))
+       ```
+
+  2. **Vị trí 1.2 — Thêm các cờ CLI dữ liệu**:
+     * Tệp: [`common/engine/cli_args.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/engine/cli_args.py#L40-L49)
+     * Thao tác: Bổ sung 3 đối số vào `data_group`:
+       ```python
+       data_group.add_argument("--min-train-area", type=float, default=5.0,
+                               help="Ngưỡng diện tích u tối thiểu (mm²) khi lập chỉ mục (mặc định: 5.0)")
+       data_group.add_argument("--neg-ratio", type=float, default=0.5,
+                               help="Tỷ lệ mẫu âm tính trên lát dương tính (mặc định: 0.5)")
+       data_group.add_argument("--min-neg-per-case", type=int, default=4,
+                               help="Số lát âm tính tối thiểu cho mỗi ca bệnh (mặc định: 4)")
+       ```
+
+  3. **Vị trí 1.3 — Vá ngưỡng diện tích và lấy mẫu âm tính ca rỗng**:
+     * Tệp: [`common/data_pipeline/offline_builder.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/offline_builder.py#L32-L135)
+     * Thao tác:
+       * Trong định nghĩa hàm `build_dataset_index`: Thêm tham số `min_train_area=5.0, min_neg_per_case=4`.
+       * Tại dòng 110: Sửa điều kiện lọc `if area < tumor_size_low_lim:` thành `if area < min_train_area:`.
+       * Tại dòng 121–125: Sửa khối cân bằng âm tính:
+         ```python
+         # Cân bằng lát cắt âm tính theo tỷ lệ và ngưỡng sàn ca bệnh
+         if len(pos_slices) > 0:
+             num_neg_keep = max(min_neg_per_case, int(round(len(pos_slices) * zero_sl_ratio))) if zero_sl_ratio > 0 else 0
+         else:
+             num_neg_keep = min_neg_per_case if len(neg_candidates) > 0 else 0
+         ```
+
+  4. **Vị trí 1.4 — Khai báo `PosAllNegResample` và vá nhãn mặt nạ**:
+     * Tệp: [`common/data_pipeline/dataset.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/dataset.py#L160-L245)
+     * Thao tác:
+       * Khai báo lớp `PosAllNegResample(Sampler)` (mã nguồn tại **Phụ lục B**).
+       * Trong `LIDC25DDataset.__getitem__` (dòng 166–169): Đồng bộ nhãn khi không dùng union:
+         ```python
+         if not use_union:
+             msk_stack = msk_stack & (keep > 0).astype(msk_stack.dtype)
+         ```
+       * Trong hàm `build_dataloaders`: Bổ sung tham số `dynamic_neg_sampling=True, neg_ratio=0.5, min_neg_per_case=4`. Nếu bật cờ, khởi tạo:
+         ```python
+         train_sampler = PosAllNegResample(
+             train_ds.df["has_tumor"].values,
+             neg_ratio=neg_ratio,
+             min_neg_per_case=min_neg_per_case,
+             seed=seed,
+         )
+         train_loader = DataLoader(
+             train_ds, batch_size=batch_size, sampler=train_sampler,
+             num_workers=num_workers, pin_memory=pin
+         )
+         ```
+
+  5. **Vị trí 1.5 — Đặt Epoch cho Sampler trong vòng lặp huấn luyện**:
+     * Tệp: [`common/engine/base_trainer.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/engine/base_trainer.py#L512-L515)
+     * Thao tác: Trước khi gọi `self.run_epoch(train_loader, ...)`:
+       ```python
+       if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+           train_loader.sampler.set_epoch(epoch)
+       ```
+
+  6. **Vị trí 1.6 — Lưu kích thước ảnh vào metadata checkpoint**:
+     * Tệp: [`mamba_unet/trainer.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/trainer.py#L89-L104)
+     * Thao tác: Trong phương thức `checkpoint_meta()` thêm trường:
+       ```python
+       "image_size": int(os.environ.get("DUNEAI_IMAGE_SIZE", 512)),
+       ```
+
+* **Lệnh thực thi trên Google Colab**:
+  ```bash
+  # Bước 1.1: Tạo lại bảng chỉ mục lát cắt với ngưỡng diện tích 5.0 mm²
+  python -m common.data_pipeline.offline_builder build \
+    --cache-dir /content/data/cache_1mm \
+    --min-train-area 5.0 --neg-ratio 0.5 --min-neg-per-case 4
+
+  # Bước 1.2: Huấn luyện Run 1
+  DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
+    --cache-dir /content/data/cache_1mm \
+    --backbone mamba_vision_T \
+    --pretrained \
+    --freeze-backbone-epochs 3 \
+    --backbone-lr-mult 0.1 \
+    --activation relu \
+    --loss dice_bce \
+    --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 2.0}' \
+    --epochs 40 \
+    --patience 10 \
+    --batch-size 8 \
+    --lr 0.0001 \
+    --scheduler cosine \
+    --grad-clip 1.0 \
+    --workers 2 \
+    --seed 42 \
+    --run-name R1_Data_Loss \
+    --tag colab_mamba
+
+  # Bước 1.3: Đánh giá 3D so sánh trực diện với R0b
+  DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+    --cache-dir /content/data/cache_1mm \
+    --checkpoint mamba_unet/runs/R1_Data_Loss/best_model.pth \
+    --split val \
+    --thresholds 0.5 0.6 0.7 \
+    --min-areas 6.0 10.0 20.0 \
+    --min-vols 0 10 20 \
+    --out-prefix sweep_r1
+  ```
+* **Tiêu chí nghiệm thu Giai đoạn 1**:
+  * Kiểm định Bootstrap ghép cặp so với $R_{0b}$: $\Delta \text{Dice}_{3D} > +0.05$ với mức ý nghĩa $p < 0.05$.
+  * Tỷ lệ báo động giả: $\text{FP/ca} \le 1.8$ (giảm từ $2.91$ của $R_0$).
+  * Độ nhạy nốt rất nhỏ ($< 5\text{ mm}$): Tăng từ $3.39\%$ lên $> 30\%$.
+* **Checklist công việc Giai đoạn 1 (Run 1 — `R1_Data_Loss`)**:
+  - [ ] **[1.1 Cấu hình ảnh]**: Sửa `configs/config.py` đọc biến môi trường `DUNEAI_IMAGE_SIZE`.
+  - [ ] **[1.2 CLI đối số]**: Bổ sung `--min-train-area`, `--neg-ratio`, `--min-neg-per-case` vào `common/engine/cli_args.py`.
+  - [ ] **[1.3 Lập chỉ mục]**: Cập nhật `common/data_pipeline/offline_builder.py` hạ ngưỡng u nhỏ xuống $5.0\text{ mm}^2$ và cấp tối thiểu `min_neg_per_case` cho ca không u.
+  - [ ] **[1.4 Sampler & Mask]**: Khai báo `PosAllNegResample`, vá nhãn `msk_stack & (keep > 0)`, tích hợp sampler vào `build_dataloaders` trong `common/data_pipeline/dataset.py`.
+  - [ ] **[1.5 Vòng lặp Train]**: Gọi `train_loader.sampler.set_epoch(epoch)` trong `common/engine/base_trainer.py`.
+  - [ ] **[1.6 Metadata Checkpoint]**: Lưu `"image_size"` vào `checkpoint_meta()` trong `mamba_unet/trainer.py`.
+  - [ ] **[Kiểm thử cục bộ]**: Chạy selftest trên các module đã sửa (`offline_builder.py`, `dataset.py`, `trainer.py`).
+  - [ ] **[Colab 1.1]**: Chạy lệnh tạo lại bảng chỉ mục `slices.csv` trên Colab với ngưỡng $5.0\text{ mm}^2$.
+  - [ ] **[Colab 1.2]**: Chạy huấn luyện Run 1 (`R1_Data_Loss`) 40 epoch với `pos_weight=2.0`.
+  - [ ] **[Colab 1.3]**: Chạy đánh giá 3D đa ngưỡng `tools/eval_sweep_v2.py` cho Run 1.
+  - [ ] **[Nghiệm thu R1]**: Kiểm tra đạt $\Delta \text{Dice}_{3D} > +0.05$ ($p < 0.05$), $\text{FP/ca} \le 1.8$, độ nhạy nốt $< 5\text{ mm} > 30\%$.
+
+---
+
+### 8.2 Giai đoạn 2: Điều Hòa Trọng Số & Chống Quá Khớp (Run 2 — `R2_Regularization`)
+
+* **Sửa / Cải tiến cái gì**:
+  1. Phân tách `weight_decay = 0.02` thành 4 nhóm tham số chuẩn MambaVision: Áp dụng co trọng số lên Conv/Linear, miễn trừ cho Bias, LayerNorm, BatchNorm, $A_{\log}, D$ (sửa P4, P8).
+  2. Bổ sung trọng số trượt Exponential Moving Average (`EMA = 0.999`) (sửa P13, chống dao động may rủi giữa các epoch).
+  3. Mở rộng bộ tăng cường hình học Affine & Jitter cấp 2 (`--aug-level 2`) (sửa P4, phá vỡ tính cố định của ô cửa sổ Stage 3–4).
+* **Vị trí mã nguồn chi tiết & Cách sửa**:
+
+  1. **Vị trí 2.1 — Thêm cờ CLI tối ưu hóa**:
+     * Tệp: [`common/engine/cli_args.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/engine/cli_args.py#L75-L100)
+     * Thao tác: Bổ sung 3 đối số vào `train_group`:
+       ```python
+       train_group.add_argument("--weight-decay", type=float, default=0.0,
+                                help="Hệ số suy giảm trọng số (khuyến nghị: 0.02)")
+       train_group.add_argument("--ema", type=float, default=0.0,
+                                help="Hệ số trượt EMA (khuyến nghị: 0.999, 0 = tắt)")
+       train_group.add_argument("--aug-level", type=int, default=1, choices=[1, 2],
+                                help="Cấp độ tăng cường dữ liệu (1: Flip/Rot90, 2: Affine+Jitter)")
+       ```
+
+  2. **Vị trí 2.2 — Tái cấu trúc hàm phân nhóm tham số trong Trainer**:
+     * Tệp: [`mamba_unet/trainer.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/trainer.py#L71-L87)
+     * Thao tác: Viết lại phương thức `build_param_groups(self, lr: float)`:
+       ```python
+       def build_param_groups(self, lr: float) -> List[Dict[str, Any]]:
+           unwrapped = self._unwrap_model()
+           wd = getattr(self, "weight_decay", 0.0)
+           bb_mult = getattr(self, "backbone_lr_mult", 0.1)
+
+           def _split(module):
+               decay, no_decay = [], []
+               for name, param in module.named_parameters():
+                   if not param.requires_grad:
+                       continue
+                   if param.ndim <= 1 or name.endswith(".bias") or "norm" in name.lower() or name.endswith(("_a_log", "_d")):
+                       no_decay.append(param)
+                   else:
+                       decay.append(param)
+               return decay, no_decay
+
+           dec_decay, dec_no_decay = _split(unwrapped.decoder)
+           bb_decay, bb_no_decay = _split(unwrapped.encoder)
+
+           return [
+               {"params": dec_decay, "lr": lr, "weight_decay": wd, "name": "decoder_decay"},
+               {"params": dec_no_decay, "lr": lr, "weight_decay": 0.0, "name": "decoder_no_decay"},
+               {"params": bb_decay, "lr": lr * bb_mult, "weight_decay": wd, "name": "backbone_decay"},
+               {"params": bb_no_decay, "lr": lr * bb_mult, "weight_decay": 0.0, "name": "backbone_no_decay"},
+           ]
+       ```
+
+  3. **Vị trí 2.3 — Tích hợp bộ tích lũy EMA trong Base Trainer**:
+     * Tệp: [`common/engine/base_trainer.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/engine/base_trainer.py#L280-L310)
+     * Thao tác:
+       * Khai báo lớp `ModelEMA`: Cập nhật $\theta_{\text{EMA}} \leftarrow \alpha \theta_{\text{EMA}} + (1 - \alpha) \theta$ sau mỗi `optimizer.step()`.
+       * Trong `BaseTrainer.__init__`: Khởi tạo `self.ema = ModelEMA(self.model, decay=self.ema_decay)` nếu `self.ema_decay > 0`.
+       * Trong `run_epoch()`: Gọi `self.ema.update(self.model)` sau khi cập nhật trọng số.
+       * Trong `save_checkpoint()`: Lưu thêm `ema_state_dict` vào tệp `.pth`.
+
+  4. **Vị trí 2.4 — Phép biến đổi không gian Affine & Jitter cấp 2**:
+     * Tệp: [`common/data_pipeline/dataset.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/dataset.py#L100-L125)
+     * Thao tác: Trong `_augment_stack`, nếu `self.aug_level == 2`: Bổ sung xoay ngẫu nhiên $\pm 15^\circ$, co giãn $0.85\text{--}1.15$, và tịnh tiến $\pm 32\text{ px}$ đồng bộ trên cả ảnh đầu vào và mặt nạ.
+
+* **Lệnh thực thi trên Google Colab**:
+  ```bash
+  DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
+    --cache-dir /content/data/cache_1mm \
+    --backbone mamba_vision_T \
+    --pretrained \
+    --freeze-backbone-epochs 3 \
+    --backbone-lr-mult 0.1 \
+    --activation relu \
+    --loss dice_bce \
+    --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 2.0}' \
+    --weight-decay 0.02 \
+    --ema 0.999 \
+    --aug-level 2 \
+    --epochs 40 \
+    --patience 10 \
+    --batch-size 8 \
+    --lr 0.0001 \
+    --scheduler cosine \
+    --grad-clip 1.0 \
+    --workers 2 \
+    --seed 42 \
+    --run-name R2_Regularization \
+    --tag colab_mamba
+
+  # Đánh giá 3D
+  DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+    --cache-dir /content/data/cache_1mm \
+    --checkpoint mamba_unet/runs/R2_Regularization/best_model.pth \
+    --split val \
+    --thresholds 0.5 0.6 0.7 \
+    --min-areas 6.0 10.0 20.0 \
+    --min-vols 0 10 20 \
+    --out-prefix sweep_r2
+  ```
+* **Tiêu chí nghiệm thu Giai đoạn 2**:
+  * Khoảng cách Overfitting ($\text{Gap} = \text{Train Dice}_{2D} - \text{Val Dice}_{2D}$) thu hẹp từ $13.0\%$ xuống $\le 6.0\%$.
+  * Tỷ lệ báo động giả tiếp tục hạ xuống $\text{FP/ca} \le 1.2$.
+  * $\text{Dice}_{3D}$ gia tăng thêm $+0.02\text{--}0.04$ so với Run 1.
+* **Checklist công việc Giai đoạn 2 (Run 2 — `R2_Regularization`)**:
+  - [ ] **[2.1 CLI tối ưu]**: Bổ sung cờ `--weight-decay`, `--ema`, `--aug-level` vào `common/engine/cli_args.py`.
+  - [ ] **[2.2 Phân nhóm tham số]**: Viết lại hàm `build_param_groups` tách 4 nhóm tham số trong `mamba_unet/trainer.py`.
+  - [ ] **[2.3 Bộ tích lũy EMA]**: Thêm lớp `ModelEMA`, gọi cập nhật sau mỗi optimizer step và lưu vào checkpoint trong `common/engine/base_trainer.py`.
+  - [ ] **[2.4 Tăng cường cấp 2]**: Bổ sung biến đổi Affine (xoay $\pm 15^\circ$, co giãn $0.85\text{--}1.15$, dịch tâm $\pm 32\text{ px}$) trong `common/data_pipeline/dataset.py`.
+  - [ ] **[Kiểm thử cục bộ]**: Chạy selftest kiểm tra 4 nhóm param groups và tính năng EMA.
+  - [ ] **[Colab 2.1]**: Chạy huấn luyện Run 2 (`R2_Regularization`) trên Colab.
+  - [ ] **[Colab 2.2]**: Chạy đánh giá 3D đa ngưỡng `tools/eval_sweep_v2.py` cho Run 2.
+  - [ ] **[Nghiệm thu R2]**: Kiểm tra khoảng cách Overfit Gap thu hẹp về $\le 6.0\%$, $\text{FP/ca} \le 1.2$, $\text{Dice}_{3D}$ tăng $+0.02\text{--}0.04$.
+
+---
+
+### 8.3 Giai đoạn 3: Bứt Phá Nốt Nhỏ Bằng Nhánh Skip Độ Nét Cao (Run 3 — `R3_HR_Skip`)
+
+* **Sửa / Cải tiến cái gì**:
+  Nối trực tiếp nhánh đặc trưng độ nét cao ($H/2$ từ Stem Backbone và $H/1$ từ Stem CT đầu vào) vào Decoder (sửa dứt điểm P5). Cờ `high_res_skip=False` mặc định tắt hoàn toàn để tuân thủ nghiêm ngặt **Quy tắc Rule R1**.
+* **Vị trí mã nguồn chi tiết & Cách sửa**:
+
+  1. **Vị trí 3.1 — Trích xuất đặc trưng Stem $H/2$ trong Backbone**:
+     * Tệp: [`mamba_unet/backbone/mamba_vision.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/backbone/mamba_vision.py#L76-L91)
+     * Thao tác:
+       * Trong `PatchEmbed`: Tách quy trình tích chập thành chặng 1 (`conv1_stem`: $3 \rightarrow 32$, stride 2, cho tensor $H/2$) và chặng 2 (`conv2_stem`: $32 \rightarrow 80$, stride 2, cho tensor $H/4$).
+       * Trong `MambaVision.forward_features`: Bổ sung tham số `return_stem: bool = False`. Nếu bật cờ, trả về bộ `(stem_feat, [f1, f2, f3, f4])` trong đó `stem_feat` có số chiều $(B, 32, H/2, W/2)$.
+
+  2. **Vị trí 3.2 — Thêm 2 tầng Skip độ nét cao trong Decoder**:
+     * Tệp: [`mamba_unet/decoder.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/decoder.py#L65-L98)
+     * Thao tác:
+       * Thêm tham số khởi tạo: `high_res_skip: bool = False, in_channels: int = 3`.
+       * Khởi tạo khối khi bật cờ:
+         ```python
+         if self.high_res_skip:
+             self.up4 = UpBlock(c1, 32, 32, use_conv_transpose=False, act=act)   # H/4 -> H/2, concat stem_feat (32ch)
+             self.hr_stem = DoubleConv(in_channels, 16, act=act)                 # Input CT 3ch -> 16ch tại H x W
+             self.up5 = UpBlock(32, 16, 16, use_conv_transpose=False, act=act)   # H/2 -> H/1, concat hr_stem (16ch)
+             self.outc_hr = OutConv(16, num_classes, init_bias=init_bias)
+         ```
+       * Trong `forward(self, features, stem_feat=None, x_input=None)`:
+         * Nếu `not self.high_res_skip`: Chạy nhánh gốc $100\%$ không đổi (`final_up(d3) -> outc`).
+         * Nếu `self.high_res_skip`: Chạy qua `up4 -> hr_stem -> up5 -> outc_hr`.
+
+  3. **Vị trí 3.3 — Cập nhật Wrapper Mô hình Chính**:
+     * Tệp: [`mamba_unet/model.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/model.py#L41-L85)
+     * Thao tác: Nhận tham số `high_res_skip: bool = False`, truyền cho Backbone và Decoder, chuyển tensor `x` và `stem_feat` vào Decoder khi `forward(x)`.
+
+  4. **Vị trí 3.4 — Thêm cờ CLI `--hr-skip`**:
+     * Tệp: [`common/engine/cli_args.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/engine/cli_args.py#L52-L65), [`mamba_unet/train_main.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/train_main.py#L98) và [`mamba_unet/evaluate.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/evaluate.py).
+     * Thao tác: Bổ sung `model_group.add_argument("--hr-skip", action="store_true", help="Bật nhánh Skip độ nét cao H/2 và H/1")`.
+
+* **Lệnh thực thi trên Google Colab**:
+  ```bash
+  DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
+    --cache-dir /content/data/cache_1mm \
+    --backbone mamba_vision_T \
+    --pretrained \
+    --hr-skip \
+    --freeze-backbone-epochs 3 \
+    --backbone-lr-mult 0.1 \
+    --activation relu \
+    --loss dice_bce \
+    --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 2.0}' \
+    --weight-decay 0.02 \
+    --ema 0.999 \
+    --aug-level 2 \
+    --epochs 40 \
+    --patience 10 \
+    --batch-size 8 \
+    --lr 0.0001 \
+    --scheduler cosine \
+    --grad-clip 1.0 \
+    --workers 2 \
+    --seed 42 \
+    --run-name R3_Architecture_HR_Skip \
+    --tag colab_mamba
+
+  # Đánh giá 3D
+  DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+    --cache-dir /content/data/cache_1mm \
+    --checkpoint mamba_unet/runs/R3_Architecture_HR_Skip/best_model.pth \
+    --split val \
+    --thresholds 0.5 0.6 0.7 \
+    --min-areas 6.0 10.0 20.0 \
+    --min-vols 0 10 20 \
+    --out-prefix sweep_r3
+  ```
+* **Tiêu chí nghiệm thu Giai đoạn 3**:
+  * Kiểm định McNemar trên nốt nhỏ ($d < 10\text{ mm}$): Đạt mức ý nghĩa thống kê $p < 0.05$ so với Run 2.
+  * Độ nhạy phát hiện nốt $< 5\text{ mm}$ bứt phá lên $> 45\%$.
+  * Điểm toàn diện: $\text{Dice}_{3D} \ge 0.58$, $\text{FP/ca} \le 1.0$.
+* **Checklist công việc Giai đoạn 3 (Run 3 — `R3_HR_Skip`)**:
+  - [ ] **[3.1 Stem Backbone]**: Sửa `mamba_unet/backbone/mamba_vision.py` hỗ trợ `return_stem=True` (trích xuất đặc trưng $H/2, 32\text{ch}$).
+  - [ ] **[3.2 Decoder Skip]**: Thêm tham số `high_res_skip=False` (mặc định tắt), `up4`, `hr_stem`, `up5`, `outc_hr` vào `mamba_unet/decoder.py`.
+  - [ ] **[3.3 Model Forward]**: Cập nhật `mamba_unet/model.py` để kết nối luồng tensor giữa Backbone và Decoder khi bật cờ.
+  - [ ] **[3.4 CLI & Main]**: Thêm cờ `--hr-skip` vào `cli_args.py`, `train_main.py` và `evaluate.py`.
+  - [ ] **[Kiểm thử tương thích (Rule R1)]**: Chạy selftest xác nhận khi không bật cờ `--hr-skip`, mô hình chạy khớp $100\%$ logic cũ.
+  - [ ] **[Colab 3.1]**: Chạy huấn luyện Run 3 (`R3_Architecture_HR_Skip`) với cờ `--hr-skip` trên Colab.
+  - [ ] **[Colab 3.2]**: Chạy đánh giá 3D đa ngưỡng `tools/eval_sweep_v2.py` cho Run 3.
+  - [ ] **[Nghiệm thu R3]**: Kiểm định McNemar trên nốt $< 10\text{ mm}$ có $p < 0.05$, độ nhạy nốt $< 5\text{ mm} > 45\%$, $\text{Dice}_{3D} \ge 0.58$.
+
+---
+
+### 8.4 Giai đoạn 4: Nghiệm Thu Chung Cuộc Trên Toàn Bộ 1,010 Ca (Run 4 — `R4_Final_1010`)
+
+* **Sửa / Cải tiến cái gì**:
+  1. Mở rộng kho dữ liệu huấn luyện từ 500 ca lên toàn bộ $1,010$ ca LIDC-IDRI (sửa P12).
+  2. Phân tách tập Kiểm thử độc lập (Test Split $10\% \approx 101$ ca) chưa từng xuất hiện trong quá trình tinh chỉnh mô hình.
+  3. Huấn luyện phiên bản hoàn thiện nhất để chốt số liệu báo cáo Đồ án tốt nghiệp CT208E.
+* **Vị trí mã nguồn chi tiết & Cách sửa**:
+
+  1. **Vị trí 4.1 — Hỗ trợ 3 tập Train/Val/Test trong bộ dựng dữ liệu**:
+     * Tệp: [`common/data_pipeline/offline_builder.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/offline_builder.py#L32-L75)
+     * Thao tác: Bổ sung tham số `test_split: float = 0.10, val_split: float = 0.10`. Phân bổ ngẫu nhiên bệnh nhân thành 3 tập riêng biệt: Train ($80\% \approx 808$ ca), Val ($10\% \approx 101$ ca), Test ($10\% \approx 101$ ca).
+
+  2. **Vị trí 4.2 — Mở rộng công cụ suy luận hỗ trợ `--split test`**:
+     * Tệp: [`mamba_unet/evaluate.py`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/evaluate.py) và `tools/eval_sweep_v2.py`.
+     * Thao tác: Cho phép nạp `split="test"` để đo đạc khách quan lần cuối cùng.
+
+* **Lệnh thực thi trên Google Colab**:
+  ```bash
+  # Bước 4.1: Dựng chỉ mục toàn diện trên 1,010 ca (chia tách 80% Train, 10% Val, 10% Test)
+  python -m common.data_pipeline.offline_builder build \
+    --cache-dir /content/data/cache_1mm \
+    --min-train-area 5.0 --neg-ratio 0.5 --min-neg-per-case 4 \
+    --val-split 0.10 --test-split 0.10
+
+  # Bước 4.2: Huấn luyện phiên bản chung cuộc Run 4
+  DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
+    --cache-dir /content/data/cache_1mm \
+    --backbone mamba_vision_T \
+    --pretrained \
+    --hr-skip \
+    --freeze-backbone-epochs 3 \
+    --backbone-lr-mult 0.1 \
+    --activation relu \
+    --loss dice_bce \
+    --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 2.0}' \
+    --weight-decay 0.02 \
+    --ema 0.999 \
+    --aug-level 2 \
+    --epochs 45 \
+    --patience 12 \
+    --batch-size 8 \
+    --lr 0.0001 \
+    --scheduler cosine \
+    --grad-clip 1.0 \
+    --workers 2 \
+    --seed 42 \
+    --run-name R4_Final_1010 \
+    --tag colab_mamba
+
+  # Bước 4.3: Nghiệm thu chính thức trên tập Test độc lập (101 ca)
+  DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
+    --cache-dir /content/data/cache_1mm \
+    --checkpoint mamba_unet/runs/R4_Final_1010/best_model.pth \
+    --split test \
+    --thresholds 0.5 0.6 0.7 \
+    --min-areas 6.0 --min-vols 10.0 \
+    --out-prefix test_report_r4
+  ```
+* **Tiêu chí nghiệm thu Đồ án CT208E**:
+  * $\text{Mean Dice}_{3D} \ge 0.62$ trên tập Test độc lập.
+  * Tỷ lệ báo động giả duy trì $\text{FP/ca} \le 0.8$.
+  * Độ nhạy tổng thể mọi kích thước nốt u đạt $\ge 80\%$.
+  * Xuất toàn bộ biểu đồ FROC, Precision-Recall và lát cắt trực quan cho báo cáo khóa luận.
+* **Checklist công việc Giai đoạn 4 (Run 4 — `R4_Final_1010`)**:
+  - [ ] **[4.1 Chia tách 3 tập]**: Cập nhật `common/data_pipeline/offline_builder.py` hỗ trợ `test_split=0.10` phân chia 80% Train, 10% Val, 10% Test.
+  - [ ] **[4.2 Đánh giá Test]**: Cập nhật `mamba_unet/evaluate.py` và `eval_sweep_v2.py` hỗ trợ cờ `--split test`.
+  - [ ] **[Dữ liệu 1,010 ca]**: Giải nén và dựng toàn bộ chỉ mục 1,010 ca LIDC-IDRI trên Colab/Drive.
+  - [ ] **[Colab 4.1]**: Chạy huấn luyện Run 4 (`R4_Final_1010`, 45 epochs, patience 12) với tổ hợp cấu hình tối ưu nhất.
+  - [ ] **[Colab 4.2]**: Chạy đánh giá chính thức trên tập Test độc lập (101 ca).
+  - [ ] **[Nghiệm thu CT208E]**: Đạt $\text{Mean Dice}_{3D} \ge 0.62$, $\text{FP/ca} \le 0.8$, độ nhạy tổng thể $\ge 80\%$.
+  - [ ] **[Báo cáo khóa luận]**: Xuất biểu đồ FROC, ma trận nhầm lẫn, đồ thị huấn luyện và ảnh lát cắt phân đoạn 3D minh họa.
+
+---
+
+## 9. TỔNG HỢP LỘ TRÌNH THỰC NGHIỆM VÀ TIÊU CHÍ QUYẾT ĐỊNH (SUMMARY TABLE)
+
+Lệnh mẫu thực thi chuẩn trên môi trường Colab:
+```bash
+DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
+  --cache-dir /content/data/cache_1mm \
+  --backbone mamba_vision_T \
+  --pretrained \
+  --freeze-backbone-epochs 3 \
+  --backbone-lr-mult 0.1 \
+  --activation relu \
+  --loss dice_bce \
+  --epochs 40 \
+  --patience 10 \
+  --batch-size 8 \
+  --lr 0.0001 \
+  --scheduler cosine \
+  --grad-clip 1.0 \
+  --workers 2 \
+  --seed 42 \
+  --run-name <TÊN_RUN> \
+  --tag colab_mamba \
+  <CỜ_THAY_ĐỔI>
+```
+
+### Bảng Lộ Trình 5 Phiên Chạy Chiến Lược
+
+| Phiên chạy | Tổ hợp tham số & Kỹ thuật kích hoạt | Sửa ở mục | Tiêu chí quyết định (Decision Rules) |
+| :--- | :--- | :---: | :--- |
+| **Run 0 ($R_0$)**<br>*(Đã xong)* | • Ảnh 512, BS 8, min-train-area 20, neg-ratio 0.25, pos-weight 4.0.<br>• Chạy $R_{0b}$ đo lại với bộ lọc mới ($6\text{ mm}^2, V_{\min} = 10$). | §2, §2.3, §8.0 | **Mốc đối chứng cơ sở**:<br>$\text{Dice}_{3D} = 0.3771$, $\text{FP/ca} = 2.91$. Độ nhạy nốt $< 5\text{ mm}$ chỉ $3.39\%$. |
+| **Run 1 (`R1_Data_Loss`)** | • `DUNEAI_IMAGE_SIZE=448`<br>• `--min-train-area 5.0 --neg-ratio 0.5`<br>• Sampler `PosAllNegResample` + `min_neg_per_case = 4`<br>• `--loss-params '{"pos_weight": 2.0}'` | §3.1, §3.1b, §4, §5.3, §8.1 | **Tiêu chí chấp nhận**:<br>• $\Delta \text{Dice}_{3D} > +0.05$ so với $R_{0b}$ (ghép cặp bootstrap $p < 0.05$).<br>• $\text{FP/ca} \le 1.8$. Độ nhạy nốt $< 5\text{ mm}$ tăng $> 30\%$. |
+| **Run 2 (`R2_Regularization`)** | • Kế thừa toàn bộ cấu hình **Run 1**<br>• Thêm `--weight-decay 0.02` (4 nhóm param)<br>• Thêm `--ema 0.999`<br>• Thêm `--aug-level 2` (Affine $\pm 32\text{ px}$ + Jitter) | §3.4, §5.1, §5.2, §8.2 | **Tiêu chí chấp nhận**:<br>• Gap Train-Val thu hẹp từ $13\%$ xuống $\le 6\%$.<br>• $\text{FP/ca} \le 1.2$. $\text{Dice}_{3D}$ tăng thêm $+0.02\text{--}0.04$ so với Run 1. |
+| **Run 3 (`R3_HR_Skip`)** | • Kế thừa toàn bộ cấu hình **Run 2**<br>• Kích hoạt `--hr-skip` ($H/2, H/1$ Skip connections)<br>• Pretrained ImageNet chuẩn | §6.1, §8.3 | **Tiêu chí chấp nhận**:<br>• Kiểm định McNemar trên nốt $< 10\text{ mm}$ đạt $p < 0.05$.<br>• Độ nhạy nốt $< 5\text{ mm}$ đạt $> 45\%$. $\text{Dice}_{3D} \ge 0.58$. |
+| **Run 4 (`R4_Final_1010`)** | • Cấu hình tối ưu từ **Run 3**<br>• Chạy trên toàn bộ **$1,010$ ca LIDC-IDRI**<br>• Tách tập Test độc lập $10\%$ ($101$ ca), `--epochs 45` | §5.6, §8.4 | **Nghiệm thu đồ án CT208E**:<br>Xuất toàn bộ bảng chỉ số, biểu đồ FROC, Precision-Recall và lát cắt trực quan trên tập Test. |
+
+---
+
+## 10. ĐIỀU CHỈNH KHỚP BÁO CÁO HỆ THỐNG `MAMBA_UNET_SYSTEM_REPORT.md`
+
+| Nội dung cũ trong báo cáo | Thực tế chính xác cần chuẩn hóa |
+| :--- | :--- |
+| Ghi "Quét hai chiều (Bi-directional scan)" | Thực tế `selective_scan_fn` chỉ quét **một chiều**; tính nhân quả được bù đắp qua nhánh conv1d + SiLU ghép nối (`torch.cat`). |
+| Ghi "Lọc cụm có thể tích $< 20\text{ mm}^3$" | Nhầm lẫn đơn vị: Thực tế code lọc theo **diện tích lát lớn nhất $\ge 20\text{ mm}^2$** trên lưới chuẩn $1\text{ mm}$. |
+| Ghi "Tốc độ $\sim 31\text{ ảnh/giây}$" | Con số này chỉ đúng khi **đóng băng backbone**. Khi mở băng toàn mạng, tốc độ thực tế là $\sim 2.2\text{ it/s}$ ($5\text{m}16\text{s}$/epoch). |
+
+---
+
+## PHỤ LỤC A: KỊCH BẢN ĐÁNH GIÁ ĐỐI CHỨNG $R_{0b}$ (`tools/eval_sweep_v2.py`)
+
+Kịch bản hỗ trợ quét đa chiều: Ngưỡng xác suất $\times$ Ngưỡng diện tích lát $\times$ Ngưỡng thể tích khối 3D:
 
 ```python
 # -*- coding: utf-8 -*-
-"""tools/eval_sweep.py - Quét ngưỡng + đánh giá 3D mức bệnh nhân và mức nốt."""
+"""tools/eval_sweep_v2.py - Đánh giá đối chứng R0b đa ngưỡng diện tích và thể tích."""
 import argparse, sys
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-import torch
+import numpy as np, pandas as pd, torch
 from scipy import ndimage as ndi
 
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from common.data_pipeline.medical_prep import lung_cache_path
-from common.eval3d.metrics3d import compute_3d_metrics
 from common.eval3d.postprocess3d import postprocess_3d_mask
 from common.eval3d.volume_inference import predict_patient_volume
 from mamba_unet.evaluate import load_mamba_unet_model
 
 S26 = np.ones((3, 3, 3), np.uint8)
-BINS = [(0, 5), (5, 10), (10, 20), (20, 1e9)]          # đường kính tương đương (mm)
 
-
-def eq_diam(sub):                                       # sub: mask bool (z,y,x) của 1 nốt
-    area = sub.reshape(sub.shape[0], -1).sum(1).max()   # diện tích lát lớn nhất (1 px = 1 mm²)
+def eq_diam(sub):
+    area = sub.reshape(sub.shape[0], -1).sum(1).max()
     return 2.0 * float(np.sqrt(area / np.pi))
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -78,10 +857,10 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--split", default="val")
     ap.add_argument("--backbone", default="mamba_vision_T")
-    ap.add_argument("--thresholds", type=float, nargs="+", default=[0.3, 0.4, 0.5, 0.6, 0.7])
-    ap.add_argument("--min-area", type=float, default=20.0)
-    ap.add_argument("--tta", action="store_true")
-    ap.add_argument("--out-prefix", default="eval_sweep")
+    ap.add_argument("--thresholds", type=float, nargs="+", default=[0.5, 0.6, 0.7])
+    ap.add_argument("--min-areas", type=float, nargs="+", default=[6.0, 10.0, 20.0])
+    ap.add_argument("--min-vols", type=float, nargs="+", default=[0.0, 10.0, 20.0])
+    ap.add_argument("--out-prefix", default="sweep_r0b")
     a = ap.parse_args()
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -92,7 +871,7 @@ def main():
 
     pat_rows, nod_rows = [], []
     for pid in pids:
-        res = predict_patient_volume(model, cache / pid, device=dev, tta=a.tta)
+        res = predict_patient_volume(model, cache / pid, device=dev)
         prob, gt, meta = res["prob_1mm"], res["gt_mask_1mm"], res["meta"]
         sz = float(meta.get("orig_spacing_xyz", [1, 1, 1])[2])
         lp = lung_cache_path(cache / pid)
@@ -103,797 +882,120 @@ def main():
         diams = [eq_diam(gt_lab[sl] == i + 1) for i, sl in enumerate(gt_objs)]
 
         for th in a.thresholds:
-            pred = postprocess_3d_mask(prob, lung_mask_zyx=lung, threshold=th,
-                                       min_slice_area_mm2=a.min_area, spacing_z=sz)
-            m = compute_3d_metrics(pred, gt, spacing_z=sz, compute_hd95=False)
-            pr_lab, n_pr = ndi.label(pred, structure=S26)
-            hit = np.unique(pr_lab[gt > 0]); hit = hit[hit > 0]
-            detected = 0
-            for i, sl in enumerate(gt_objs):
-                ok = bool((pred[sl][gt_lab[sl] == i + 1] > 0).any())
-                detected += ok
-                nod_rows.append(dict(pid=pid, th=th, diam=diams[i], detected=int(ok)))
-            pat_rows.append(dict(pid=pid, th=th, dice=m["dice_3d"], precision=m["precision_3d"],
-                                 recall=m["recall_3d"], fp_comps=int(n_pr - len(hit)),
-                                 n_gt=n_gt, n_detected=detected))
-        print(f"[{pid}] xong")
+            for ma in a.min_areas:
+                for mv in a.min_vols:
+                    pred = postprocess_3d_mask(
+                        prob, lung_mask_zyx=lung, threshold=th,
+                        min_slice_area_mm2=ma, min_volume_mm3=mv, spacing_z=sz
+                    )
+                    pr_lab, n_pr = ndi.label(pred, structure=S26)
+                    hit = np.unique(pr_lab[gt > 0]); hit = hit[hit > 0]
+                    detected = 0
+                    for i, sl in enumerate(gt_objs):
+                        ok = bool((pred[sl][gt_lab[sl] == i + 1] > 0).any())
+                        detected += ok
+                        nod_rows.append(dict(pid=pid, th=th, min_area=ma, min_vol=mv, diam=diams[i], detected=int(ok)))
+                    
+                    # Tính metrics Dice, Precision, Recall
+                    intersection = float(np.logical_and(pred > 0, gt > 0).sum())
+                    pred_sum = float((pred > 0).sum())
+                    gt_sum = float((gt > 0).sum())
+                    dice = (2.0 * intersection) / (pred_sum + gt_sum + 1e-6) if (pred_sum + gt_sum > 0) else (1.0 if n_gt == 0 else 0.0)
+                    prec = intersection / (pred_sum + 1e-6) if pred_sum > 0 else (1.0 if n_gt == 0 else 0.0)
+                    rec = intersection / (gt_sum + 1e-6) if gt_sum > 0 else (1.0 if pred_sum == 0 else 0.0)
 
-    P, N = pd.DataFrame(pat_rows), pd.DataFrame(nod_rows)
-    P.to_csv(f"{a.out_prefix}_patients.csv", index=False)
-    N.to_csv(f"{a.out_prefix}_nodules.csv", index=False)
+                    pat_rows.append(dict(
+                        pid=pid, th=th, min_area=ma, min_vol=mv, dice=dice, precision=prec,
+                        recall=rec, fp_comps=int(n_pr - len(hit)), n_gt=n_gt, n_detected=detected
+                    ))
+        print(f"[{pid}] Đã quét xong.")
 
-    print("\n=== THEO NGƯỠNG (trung bình trên ca) ===")
-    print(P.groupby("th")[["dice", "precision", "recall", "fp_comps"]].mean().round(4))
-    print("\n=== ĐỘ NHẠY THEO NỐT & KÍCH THƯỚC (đường kính tương đương, mm) ===")
-    for lo, hi in BINS:
-        sub = N[(N["diam"] >= lo) & (N["diam"] < hi)]
-        if len(sub):
-            print(f"[{lo:>4}-{hi if hi < 1e8 else 'inf'}) n={len(sub)//len(a.thresholds):4d} ",
-                  sub.groupby("th")["detected"].mean().round(3).to_dict())
-
+    pd.DataFrame(pat_rows).to_csv(f"{a.out_prefix}_patients.csv", index=False)
+    pd.DataFrame(nod_rows).to_csv(f"{a.out_prefix}_nodules.csv", index=False)
+    print(f"✅ Hoàn tất lưu kết quả đối chứng R0b tại {a.out_prefix}_*.csv")
 
 if __name__ == "__main__":
     main()
 ```
 
-Chạy (Colab):
+---
 
-```bash
-python tools/eval_sweep.py --cache-dir /content/data/cache_1mm \
-  --checkpoint mamba_unet/runs/mamba_colab_500item_25epoch_extra_test/best_model.pth \
-  --split val --out-prefix sweep_r0
-```
+## PHỤ LỤC B: BỘ LẤY MẪU ÂM TÍNH ĐỘNG (`PosAllNegResample`)
 
-**Cách đọc kết quả**
-
-| Quan sát | Kết luận | Hành động |
-|---|---|---|
-| `fp_comps` lớn (≫ 1/ca) và precision ≪ recall | Dương tính giả là nút thắt | §4 (`pos_weight`↓), §5.2 (neg-ratio↑, hard negative), ngưỡng↑ |
-| Độ nhạy nốt < 5 mm rất thấp | Mất nốt nhỏ (do P1, P5) | §3.1, §6.1 |
-| Dice 3D tăng rõ khi đổi ngưỡng ≠ 0.5 | Ngưỡng lệch do `pos_weight` | Chọn ngưỡng theo val, báo cáo trên test |
-| Dice 3D ≈ Dice val 2D | Val 2D không quá lạc quan | Ưu tiên chống overfit (§3.4, §5) |
-
-### 2.2 Tạo `tools/check_cache.py`: kiểm tra P3 (mask phổi cắt u) và FOV khi đổi `IMAGE_SIZE`
+Gắn trực tiếp vào `DataLoader` huấn luyện để phủ $81.2\%$ kho mẫu âm tính sau 40 epoch:
 
 ```python
-# -*- coding: utf-8 -*-
-"""tools/check_cache.py <cache_dir> [image_size=448]"""
-import json, sys
-from pathlib import Path
 import numpy as np
+import torch
+from torch.utils.data import Sampler
 
-root = Path(sys.argv[1]); size = int(sys.argv[2]) if len(sys.argv) > 2 else 448
-fr, lost_fov = [], []
-for mp in sorted(root.glob("LIDC-IDRI-*/meta.json")):
-    m = json.loads(mp.read_text(encoding="utf-8"))
-    f = m.get("mask_in_lung_fraction")
-    if f is not None:
-        fr.append((float(f), mp.parent.name))
-    z, h, w = m["shape_1mm_zyx"]
-    if h > size or w > size:                                   # sẽ bị crop giữa khi pad_or_crop_xy
-        proj = np.load(mp.parent / "mask_1mm.npy", mmap_mode="r")
-        proj = np.asarray(proj).any(axis=0)
-        if proj.sum() == 0:
-            continue
-        sy, sx = max(0, (h - size) // 2), max(0, (w - size) // 2)
-        inside = proj[sy:sy + min(h, size), sx:sx + min(w, size)].sum()
-        lost_fov.append((1 - inside / proj.sum(), mp.parent.name))
+class PosAllNegResample(Sampler):
+    """
+    Mỗi epoch: Giữ toàn bộ lát dương tính + lấy mẫu ngẫu nhiên (neg_ratio * n_pos) lát âm tính.
+    Đảm bảo mô hình được quan sát đa dạng các lát phổi khỏe mạnh khác nhau sau mỗi chu kỳ.
+    """
+    def __init__(self, has_tumor_array, neg_ratio=0.5, min_neg_per_case=4, seed=42):
+        has_tumor = np.asarray(has_tumor_array)
+        self.pos_indices = np.where(has_tumor == 1)[0]
+        self.neg_indices = np.where(has_tumor == 0)[0]
+        
+        # Số lượng lát âm tính cần lấy mỗi epoch
+        self.k_neg = min(len(self.neg_indices), max(min_neg_per_case, int(round(neg_ratio * len(self.pos_indices)))))
+        self.seed = int(seed)
+        self.epoch = 0
 
-if fr:
-    v = np.array([x for x, _ in fr])
-    print(f"mask_in_lung_fraction: n={len(v)} | <0.9: {(v<0.9).sum()} | <0.7: {(v<0.7).sum()} | "
-          f"median={np.median(v):.3f} | p5={np.percentile(v,5):.3f}")
-    print("5 ca tệ nhất:", sorted(fr)[:5])
-else:
-    print("Không có mask_in_lung_fraction trong meta.json (cache build thiếu --extract-lungs?)")
-print(f"Ca có FOV > {size}: {len(lost_fov)} | ca mất nhãn do crop: {sum(x>0 for x,_ in lost_fov)}")
-print("Top mất nhãn do crop:", sorted(lost_fov, reverse=True)[:5])
+    def set_epoch(self, epoch: int):
+        """Được gọi tự động ở đầu mỗi epoch trong callback on_epoch_start."""
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        sampled_neg = rng.choice(self.neg_indices, size=self.k_neg, replace=False)
+        epoch_indices = np.concatenate([self.pos_indices, sampled_neg])
+        rng.shuffle(epoch_indices)
+        return iter(epoch_indices.tolist())
+
+    def __len__(self):
+        return len(self.pos_indices) + self.k_neg
 ```
-
-- Nếu nhiều ca có `mask_in_lung_fraction < 0.9` ⇒ P3 nghiêm trọng, ưu tiên §3.2.
-- Nếu có ca mất nhãn do crop ⇒ cân nhắc trước khi đổi `IMAGE_SIZE` xuống 448 (§5.3).
 
 ---
 
-## 3. Sửa vấn đề (chi tiết theo file)
+## PHỤ LỤC C: PHƯƠNG PHÁP KIỂM ĐỊNH GHÉP CẶP THỐNG KÊ (PAIRED INFERENCE)
 
-### 3.1 [P1] Cho phép hạ ngưỡng lát u khi **dựng chỉ mục train** (giữ 20 mm² ở hậu xử lý)
-
-`offline_builder.build_dataset_index` **đã có** tham số `tumor_size_low_lim` và `zero_sl_ratio`; chỉ cần đưa chúng ra CLI.
-
-**a) `common/engine/cli_args.py`** — thêm vào `data_group`:
+Hỗ trợ kiểm tra ý nghĩa thống kê giữa các phiên chạy thực nghiệm để khẳng định kết quả cải tiến:
 
 ```python
-    data_group.add_argument("--min-train-area", type=float, default=20.0,
-                            help="Ngưỡng diện tích u (mm²) tối thiểu của lát khi dựng slices.csv (0 = giữ mọi lát có u)")
-    data_group.add_argument("--neg-ratio", type=float, default=0.25,
-                            help="Tỷ lệ lát âm tính / lát dương tính khi dựng slices.csv (ZERO_SL_RATIO)")
-    data_group.add_argument("--aug-level", type=int, choices=[1, 2], default=1,
-                            help="1: flip/rot90 (hiện tại); 2: + affine + nhiễu/tương phản")
-    data_group.add_argument("--tumor-union-p", type=float, default=1.0,
-                            help="Xác suất hợp mask u vào vùng giữ phổi lúc train (1.0 = hiện tại, 0 = đồng nhất với val)")
-    data_group.add_argument("--neighbor-mm", type=float, default=0.0,
-                            help="Khoảng cách vật lý (mm) giữa các lát 2.5D (0 = lát kề theo chỉ số như hiện tại)")
+import numpy as np
+import pandas as pd
+from scipy.stats import binomtest
+
+def paired_bootstrap(df_a, df_b, metric_col="dice", num_bootstraps=5000, seed=42):
+    """
+    Kiểm định Bootstrap ghép cặp theo bệnh nhân (Paired Bootstrap Test).
+    Trả về: (Chênh lệch trung bình, Khoảng tin cậy 95% CI).
+    """
+    merged = pd.merge(df_a[["pid", metric_col]], df_b[["pid", metric_col]], on="pid", suffixes=('_A', '_B'))
+    differences = (merged[f"{metric_col}_B"] - merged[f"{metric_col}_A"]).values
+    
+    rng = np.random.default_rng(seed)
+    bootstrap_means = [rng.choice(differences, size=len(differences), replace=True).mean() for _ in range(num_bootstraps)]
+    
+    mean_diff = float(np.mean(differences))
+    ci_lower, ci_upper = np.percentile(bootstrap_means, [2.5, 97.5])
+    return mean_diff, (float(ci_lower), float(ci_upper))
+
+def mcnemar_test(df_nod_a, df_nod_b):
+    """
+    Kiểm định McNemar theo nốt u để kiểm tra xem mô hình B có phát hiện vượt trội mô hình A.
+    b: Nốt mô hình A bắt được mà B bỏ sót.
+    c: Nốt mô hình B bắt được mà A bỏ sót.
+    """
+    merged = pd.merge(df_nod_a, df_nod_b, on=["pid", "diam"], suffixes=('_A', '_B'))
+    b = int(((merged["detected_A"] == 1) & (merged["detected_B"] == 0)).sum())
+    c = int(((merged["detected_A"] == 0) & (merged["detected_B"] == 1)).sum())
+    
+    # Tính p-value hai phía bằng phân phối nhị thức
+    p_value = binomtest(b, b + c, p=0.5).pvalue if (b + c > 0) else 1.0
+    return b, c, float(p_value)
 ```
-
-**b) `common/data_pipeline/dataset.py`** — import và `build_dataloaders`:
-
-```python
-import json                                  # (đã có ở đầu file)
-import cv2                                   # THÊM
-from configs.config import IMAGE_SIZE, TUMOR_SIZE_LOW_LIM, ZERO_SL_RATIO   # THÊM 2 hằng số
-
-def build_dataloaders(
-    cache_dir, batch_size=8, num_workers=2, in_channels=3, use_gpu_window=False,
-    lung_mask=True, augment=True, limit_train=0, limit_val=0, rebuild_index=False, seed=42,
-    tumor_size_low_lim=TUMOR_SIZE_LOW_LIM, zero_sl_ratio=ZERO_SL_RATIO,      # THÊM
-    aug_level=1, tumor_union_p=1.0, neighbor_mm=0.0,                         # THÊM
-    **kwargs,
-):
-    from pathlib import Path
-    cache_path = Path(cache_dir).resolve()
-
-    # --- Tự dựng lại slices.csv nếu tham số chỉ mục đổi (tránh dùng chỉ mục cũ trong im lặng) ---
-    params = {"version": 2, "tumor_size_low_lim": float(tumor_size_low_lim), "zero_sl_ratio": float(zero_sl_ratio)}
-    sidecar = cache_path / "slices.params.json"
-    old = {"version": 1, "tumor_size_low_lim": 20.0, "zero_sl_ratio": 0.25}   # mặc định của chỉ mục cũ
-    if sidecar.exists():
-        try:
-            old = json.loads(sidecar.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    if rebuild_index or old != params or not (cache_path / "slices.csv").exists():
-        build_dataset_index(cache_path, tumor_size_low_lim=tumor_size_low_lim, zero_sl_ratio=zero_sl_ratio)
-        sidecar.write_text(json.dumps(params), encoding="utf-8")
-
-    common = dict(cache_dir=cache_path, in_channels=in_channels, apply_lung=lung_mask,
-                  window_on_cpu=not use_gpu_window, neighbor_mm=neighbor_mm)
-    train_ds = LIDC25DDataset(split="train", augment=augment, aug_level=aug_level,
-                              tumor_union_p=tumor_union_p, **common)
-    val_ds = LIDC25DDataset(split="val", augment=False, **common)
-    # ... phần limit_train / limit_val / DataLoader giữ nguyên ...
-```
-
-**c) `mamba_unet/train_main.py`** — truyền cờ vào lời gọi `build_dataloaders(...)` trong `train_action`:
-
-```python
-        tumor_size_low_lim=args.min_train_area,
-        zero_sl_ratio=args.neg_ratio,
-        aug_level=args.aug_level,
-        tumor_union_p=args.tumor_union_p,
-        neighbor_mm=args.neighbor_mm,
-```
-
-> ⚠️ Đổi chỉ mục ⇒ **tập val đổi** (có thêm lát nhỏ/âm tính) ⇒ Val Dice 2D mới **không so trực tiếp** được với 0.7456. So sánh bằng `eval_sweep.py` (3D) trên cùng tập ca.
-
-**Giá trị khuyến nghị:** `--min-train-area 5 --neg-ratio 0.5`. Không nên 0 tuyệt đối: nhãn là *hợp* của các reader nên các mảnh 1–3 pixel là nhiễu nhãn.
-**Kỳ vọng:** recall nốt nhỏ ↑, 3D Dice ↑ (có thể Val Dice 2D mới lại *giảm* vì val khó hơn — đó là bình thường).
-
----
-
-### 3.2 [P3] Đồng nhất cách che phổi giữa train và val
-
-**`common/data_pipeline/dataset.py`** — class `LIDC25DDataset`:
-
-1. `__init__`: thêm tham số và lưu:
-
-```python
-    def __init__(self, cache_dir, csv_path=None, split="train", in_channels=3, image_size=IMAGE_SIZE,
-                 apply_lung=True, window_on_cpu=True, quantize=True, augment=False,
-                 aug_level=1, tumor_union_p=1.0, neighbor_mm=0.0):       # THÊM 3 tham số cuối
-        ...
-        self.aug_level = int(aug_level)
-        self.tumor_union_p = float(tumor_union_p)
-        self.neighbor_mm = float(neighbor_mm)
-```
-
-2. `__getitem__`: thay đoạn `tumor_for_keep`:
-
-```python
-            # TRƯỚC: tumor_for_keep = msk_stack if self.split == "train" else None
-            use_union = (self.split == "train") and (random.random() < self.tumor_union_p)
-            tumor_for_keep = msk_stack if use_union else None
-```
-
-**Thực nghiệm:** `--tumor-union-p 0.0` (đồng nhất hoàn toàn với val) và `0.5` (trộn). Nếu P3 thật sự nghiêm trọng (xem `check_cache.py`), nên thấy gap train–val giảm và nốt sát thành ngực khá hơn. Nếu `mask_in_lung_fraction` ≈ 1 ở hầu hết ca thì tác động nhỏ.
-**Giải pháp bổ sung (nếu nhiều ca bị cắt):** làm lớn mask phổi (closing/convex hull theo lát) trong `extract_lungs_mask` rồi rebuild cache — tốn công nên chỉ làm khi số liệu cho thấy cần thiết.
-
----
-
-### 3.3 [P2, P13] Log Precision/Recall mỗi epoch + sửa log LR
-
-**`common/engine/base_trainer.py`**
-
-a) cuối `run_epoch`, thay khối return:
-
-```python
-        eps = 1e-6
-        epoch_loss = total_loss / max(1, total_samples)
-        epoch_dice = (2.0 * inter_sum + eps) / (pred_sum + target_sum + eps)
-        union_sum = pred_sum + target_sum - inter_sum
-        epoch_iou = (inter_sum + eps) / (union_sum + eps)
-        epoch_prec = (inter_sum + eps) / (pred_sum + eps)      # THÊM
-        epoch_rec = (inter_sum + eps) / (target_sum + eps)     # THÊM
-        return {"loss": epoch_loss, "dice": epoch_dice, "iou": epoch_iou,
-                "precision": epoch_prec, "recall": epoch_rec}
-```
-
-b) trong `fit`, dict `row` thêm 2 cột (sau `val_iou`):
-
-```python
-                    "val_precision": round(val_m["precision"], 5),
-                    "val_recall": round(val_m["recall"], 5),
-```
-
-c) `log_msg`: đổi phần Val thành
-`f"Val [Loss: {val_m['loss']:.4f}, Dice: {val_m['dice']:.4f}, P: {val_m['precision']:.3f}, R: {val_m['recall']:.3f}] | "`
-
-d) sửa LR được log là LR *của epoch vừa chạy* (hiện đang in LR sau `scheduler.step()`): chuyển dòng
-
-```python
-                lr = self.optimizer.param_groups[0]["lr"] if self.optimizer else 0.0
-```
-lên **trước** khối `if self.scheduler is not None:`.
-
-`history.csv` cũ vẫn đọc/resume được (cột mới là NaN ở các epoch cũ).
-
----
-
-### 3.4 [P4, P8] Weight decay thật sự có tác dụng, loại norm/bias/`A_log`/`D`
-
-**`mamba_unet/trainer.py`** — sửa `__init__` và `build_param_groups`:
-
-```python
-class MambaUNetTrainer(BaseTrainer):
-    def __init__(self, model, criterion, backbone_name="mamba_vision_T", activation_name="relu",
-                 in_channels=3, num_classes=1, freeze_backbone_epochs=0, backbone_lr_mult=0.1,
-                 weight_decay: float = 1e-4,                     # THÊM
-                 **kwargs):
-        super().__init__(model=model, criterion=criterion, **kwargs)
-        ...
-        self.weight_decay = float(weight_decay)
-
-    @staticmethod
-    def _no_decay(name: str, p: torch.nn.Parameter) -> bool:
-        return (p.ndim <= 1 or name.endswith(".bias") or "A_log" in name
-                or name.endswith(".D") or getattr(p, "_no_weight_decay", False))
-
-    def build_param_groups(self, lr: float) -> List[Dict[str, Any]]:
-        m = self._unwrap_model()
-        groups = []
-        for part, mod, mult in (("decoder", m.decoder, 1.0), ("backbone", m.encoder, self.backbone_lr_mult)):
-            dec, nodec = [], []
-            for n, p in mod.named_parameters():
-                if not p.requires_grad:
-                    continue
-                (nodec if self._no_decay(n, p) else dec).append(p)
-            if dec:
-                groups.append({"params": dec, "lr": lr * mult, "weight_decay": self.weight_decay, "name": part})
-            if nodec:
-                groups.append({"params": nodec, "lr": lr * mult, "weight_decay": 0.0, "name": part + "_nodecay"})
-        return groups
-```
-
-Nhóm `decoder` vẫn đứng đầu ⇒ `lr` log (`param_groups[0]`) không đổi ý nghĩa.
-
-**`mamba_unet/train_main.py`** — truyền `weight_decay=args.weight_decay` vào `MambaUNetTrainer(...)`.
-
-**Cập nhật `_selftest` trong `trainer.py`:** nhóm tham số giờ là 4:
-
-```python
-    groups = trainer.build_param_groups(1e-4)
-    by_name = {g["name"]: g for g in groups}
-    assert set(by_name) == {"decoder", "decoder_nodecay", "backbone", "backbone_nodecay"}
-    assert by_name["decoder"]["lr"] == 1e-4 and abs(by_name["backbone"]["lr"] - 1e-5) < 1e-9
-    assert by_name["decoder_nodecay"]["weight_decay"] == 0.0
-```
-
-> ⚠️ Resume một run **cũ** (2 nhóm) vào optimizer mới (4 nhóm) sẽ in cảnh báo "Không nạp được optimizer state" (code đã `try/except`) và chạy tiếp với optimizer mới — chấp nhận được; run mới thì không ảnh hưởng.
-
-**Giá trị chạy:** `--weight-decay 0.02` (thử 0.01–0.05).
-**Kỳ vọng:** giảm gap, +0.003–0.01 Dice (nhỏ, nhưng gần như miễn phí).
-
----
-
-### 3.5 [P7] BN backbone khi đóng băng: làm đúng ý đồ hoặc ghi rõ
-
-Hiện tại BN vẫn ở chế độ train trong các epoch freeze (xem bảng P7). Vì đầu vào CT lệch phân phối so với ImageNet, hành vi hiện tại có thể **có lợi**. Đề xuất: thêm cờ để *so sánh*, mặc định giữ nguyên.
-
-**`common/engine/base_trainer.py`** — thêm 2 hook rỗng và gọi chúng:
-
-```python
-    def on_mode_set(self, is_train: bool):
-        """Hook chạy ngay sau model.train(is_train) trong run_epoch."""
-        pass
-
-    def on_step_end(self):
-        """Hook chạy sau mỗi optimizer step."""
-        pass
-```
-
-trong `run_epoch`:
-
-```python
-        self.model.train(is_train)
-        self.on_mode_set(is_train)                      # THÊM ngay sau dòng này
-        ...
-                if is_train and self.optimizer:
-                    if self.scaler is not None and self.use_amp:
-                        ...
-                    else:
-                        ...
-                    self.on_step_end()                  # THÊM, cùng mức thụt lề với khối if/else ở trên
-```
-
-**`mamba_unet/trainer.py`:**
-
-```python
-    # __init__: thêm freeze_bn: bool = False  ->  self.freeze_bn = bool(freeze_bn); self._frozen_now = False
-    # on_epoch_start: sau khi tính should_freeze ->  self._frozen_now = bool(should_freeze)
-
-    def on_mode_set(self, is_train: bool):
-        if is_train and self.freeze_bn and self._frozen_now:
-            for m in self._unwrap_model().encoder.modules():
-                if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
-                    m.eval()
-```
-
-**`train_main.py`** — thêm `--freeze-bn` (store_true) vào `_add_mamba_specific_args` và truyền `freeze_bn=args.freeze_bn`.
-
-Nếu thử `--freeze-bn`, nên đi kèm chuẩn hóa đầu vào (§6.3), vì BN stem dùng thống kê ImageNet sẽ lệch nặng với ảnh [0,1].
-
----
-
-### 3.6 [P14] Các lỗi/bất nhất nhỏ
-
-| Việc | File | Sửa |
-|---|---|---|
-| `load_state_dict(strict=False)` nuốt lỗi thiếu/thừa khóa | `mamba_unet/evaluate.py` `load_mamba_unet_model` | `missing, unexpected = model.load_state_dict(cleaned_sd, strict=False)` rồi `print` nếu khác rỗng (hoặc `strict=True`) |
-| Warm-start (`--init-weights`) luôn strict | `base_trainer.load_checkpoint` | `self._unwrap_model().load_state_dict(sd, strict=resume_training)`; khi không resume, in `missing/unexpected` (cần cho §6.1) |
-| Docstring "264 keys" vs selftest 300 keys | `mamba_unet/model.py` đầu file | Sửa thành 300 (250 encoder + 50 decoder) |
-| `evaluate.py` không cho `--split test` | `mamba_unet/evaluate.py` | `choices=["val","train","test","all"]` (cần §5.6) |
-| Báo cáo mô tả sai code | `MAMBA_UNET_SYSTEM_REPORT.md` | Xem mục 8 |
-
----
-
-## 4. Cải tiến bằng **tham số** (không đổi code, hoặc chỉ đổi cờ đã thêm ở trên)
-
-| Tham số | Hiện tại | Thử | Lý do | Kỳ vọng |
-|---|---|---|---|---|
-| `--weight-decay` | 1e-4 | 0.01–0.05 (sau §3.4) | wd cũ vô hiệu với AdamW | Giảm gap; +0.003–0.01 |
-| `--min-train-area` | 20 | 5 | Giữ lát biên/nốt nhỏ | Recall nốt nhỏ ↑; 3D Dice ↑ |
-| `--neg-ratio` | 0.25 | 0.5–1.0 | Phân phối âm tính giống inference hơn | FP ↓ (kiểm tra bằng `fp_comps`) |
-| `--aug-level` | 1 | 2 (sau §5.2) | Chống overfit, phá lưới cửa sổ | +0.01–0.02 |
-| `--drop-path` (sau §6.4) | 0.2 cố định | 0.1 / 0.3 | Regularizer duy nhất đang chạy | ±0.005 (cần thử) |
-| `--backbone-lr-mult` | 0.1 | 0.3 | LR backbone 1e-5 có thể quá thấp cho thích nghi miền CT | Thử; có thể tăng overfit |
-| `--freeze-backbone-epochs` | 3 | 2–3 | Epoch 1–3 đã tốt; ít ảnh hưởng | ≈0 |
-| `--loss-params pos_weight` | 4.0 | 2.0 / 1.0 nếu precision ≪ recall | `pos_weight=4` đẩy mô hình dự đoán thừa | P↑, FP↓; chọn theo `eval_sweep` |
-| `--loss` | dice_bce | `focal_tversky` (α=0.3, β=0.7, γ=0.75) nếu recall ≪ precision | Phạt bỏ sót | Cải thiện recall nốt khó |
-| `--epochs` / `--patience` | 50 / 12 | 30 / 8 | Plateau từ epoch ~24, chạy ablation nhanh hơn (cosine co theo `--epochs`) | Tiết kiệm ~40% thời gian |
-| `--batch-size` | 8 (~6.5 GB) | 12–16 + `--lr` ×1.4 | Còn dư VRAM trên T4 | Ổn định BN/Dice-loss gộp batch |
-| `--workers` | 2 | đo thử 2 vs 4 | Epoch freeze 3m19s với chỉ decoder backward — có thể nghẽn CPU (đọc mmap + `lung_keep_mask` bằng cv2) | Nhanh hơn nếu Colab có ≥ 4 vCPU |
-| `--select` | `first` | `random` + `--seed 42` | Tránh lệch máy chụp ở các ID đầu | Giảm thiên lệch |
-| Số ca | 500 | **1010 ca** | Đòn bẩy lớn nhất với dữ liệu ít | +0.01–0.03 (kỳ vọng thận trọng) |
-
-Chạy toàn bộ 1010 ca (không truyền `--n-patients`):
-
-```bash
-python -m common.data_pipeline.runtime_data colab --zip auto --dest /content/data/cache_1mm
-```
-
-(500 ngẫu nhiên: thêm `--n-patients 500 --select random --seed 42`.) Thời gian mỗi epoch ~gấp đôi; Colab có thể ngắt phiên ⇒ dùng `--resume auto`.
-
----
-
-## 5. Cải tiến bằng **mã nguồn** (không đổi cấu trúc mạng)
-
-### 5.1 EMA trọng số (giảm nhiễu chọn "best epoch", thường tăng nhẹ Dice)
-
-**`mamba_unet/trainer.py`** — thêm lớp ở đầu file:
-
-```python
-class _EMA:
-    """EMA tham số; BN running stats và buffer nguyên/số đếm thì sao chép."""
-    def __init__(self, model: nn.Module, decay: float = 0.999):
-        self.decay = float(decay)
-        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        self.backup = None
-
-    @torch.no_grad()
-    def update(self, model: nn.Module):
-        for k, v in model.state_dict().items():
-            if v.dtype.is_floating_point and not (k.endswith("running_mean") or k.endswith("running_var")):
-                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
-            else:
-                self.shadow[k].copy_(v)
-
-    def swap_in(self, model: nn.Module):
-        self.backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        model.load_state_dict(self.shadow)
-
-    def swap_out(self, model: nn.Module):
-        model.load_state_dict(self.backup)
-        self.backup = None
-```
-
-trong `MambaUNetTrainer`:
-
-```python
-    # __init__: thêm ema_decay: float = 0.0  ->  self.ema_decay = float(ema_decay); self.ema = None
-
-    def on_epoch_start(self, epoch):
-        ...  # giữ nguyên phần cũ
-        if self.ema_decay > 0 and self.ema is None:
-            self.ema = _EMA(self._unwrap_model(), self.ema_decay)
-
-    def on_step_end(self):
-        if self.ema is not None:
-            self.ema.update(self._unwrap_model())
-
-    def run_epoch(self, loader, is_train=True, **kw):            # val dùng trọng số EMA
-        if (not is_train) and self.ema is not None:
-            m = self._unwrap_model()
-            self.ema.swap_in(m)
-            try:
-                return super().run_epoch(loader, is_train=False, **kw)
-            finally:
-                self.ema.swap_out(m)
-        return super().run_epoch(loader, is_train=is_train, **kw)
-
-    def save_checkpoint(self, filename, epoch, val_metrics):     # checkpoint lưu trọng số EMA
-        if self.ema is None:
-            return super().save_checkpoint(filename, epoch, val_metrics)
-        m = self._unwrap_model()
-        self.ema.swap_in(m)
-        try:
-            return super().save_checkpoint(filename, epoch, val_metrics)
-        finally:
-            self.ema.swap_out(m)
-```
-
-`train_main.py`: thêm `--ema` (float, mặc định 0.0 = tắt) và truyền `ema_decay=args.ema`.
-Lưu ý: `last_model.pth` chứa trọng số EMA nên resume sẽ tiếp tục từ trọng số EMA (lệch nhẹ so với optimizer state) — chấp nhận được. Với ~650 step/epoch, `decay=0.999` có "bán kỳ" ≈ 1 epoch.
-**Kỳ vọng:** +0.003–0.01 Dice, đường cong val mượt hơn.
-
-### 5.2 Augmentation mức 2: affine + tương phản/nhiễu
-
-**`common/data_pipeline/dataset.py`** — thêm 2 phương thức vào `LIDC25DDataset`:
-
-```python
-    def _affine_pair(self, img_chw, mask_1hw):
-        """Xoay ±15°, scale 0.85–1.15, dịch ±32 px (đồng bộ ảnh 3 kênh và mask)."""
-        h, w = img_chw.shape[1:]
-        ang, sc = random.uniform(-15, 15), random.uniform(0.85, 1.15)
-        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, sc)
-        M[:, 2] += (random.uniform(-32, 32), random.uniform(-32, 32))
-        air = 0.0 if self.window_on_cpu else -1000          # không khí: 0 (sau cửa sổ) hoặc -1000 HU
-        img = np.stack([cv2.warpAffine(c, M, (w, h), flags=cv2.INTER_LINEAR,
-                                       borderMode=cv2.BORDER_CONSTANT, borderValue=air) for c in img_chw])
-        msk = cv2.warpAffine(mask_1hw[0], M, (w, h), flags=cv2.INTER_NEAREST,
-                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)[None]
-        return np.ascontiguousarray(img), np.ascontiguousarray(msk)
-
-    @staticmethod
-    def _intensity_jitter(img):
-        """Chỉ cho ảnh đã cửa sổ [0,1]: nhân tương phản, thêm nhiễu Gaussian (không đụng vùng không khí = 0)."""
-        img = img * random.uniform(0.9, 1.1)
-        sigma = random.uniform(0.0, 0.01)
-        if sigma > 0:
-            img = img + np.random.normal(0.0, sigma, img.shape).astype(np.float32) * (img > 0)
-        return np.clip(img, 0.0, 1.0).astype(np.float32)
-```
-
-trong `__getitem__`, thay khối `if self.augment:`:
-
-```python
-        if self.augment:
-            img_out, center_mask = self._augment_pair(img_out, center_mask)
-            if self.aug_level >= 2:
-                if random.random() < 0.5:
-                    img_out, center_mask = self._affine_pair(img_out, center_mask)
-                if self.window_on_cpu:
-                    img_out = self._intensity_jitter(img_out)
-```
-
-Dịch chuyển ±32 px cũng làm lưới cửa sổ stage 3–4 trượt so với giải phẫu (giảm P6). **Kỳ vọng:** +0.01–0.02 Dice, gap giảm; có thể cần nhiều epoch hơn một chút để hội tụ.
-
-### 5.3 Giảm lãng phí pad: `IMAGE_SIZE` = 448 (bội của 224 = 14 × 16 px)
-
-Với 448: stage 3 là 28×28 = đúng 2×2 cửa sổ 14; stage 4 là 14×14 = đúng 2×2 cửa sổ 7 ⇒ **không pad**, số token stage 3 giảm 1764 → 784 (×2.25), toàn mạng nhanh hơn ~20–25%.
-
-**`configs/config.py`:**
-
-```python
-import os
-IMAGE_SIZE = int(os.environ.get("DUNEAI_IMAGE_SIZE", 512))     # mặc định giữ 512
-```
-
-Chạy train **và** eval cùng biến môi trường: `DUNEAI_IMAGE_SIZE=448 python -u -m mamba_unet.train_main ...` và `DUNEAI_IMAGE_SIZE=448 python -m mamba_unet.evaluate ...` (lệch giá trị giữa train và eval sẽ cho kết quả sai; nếu muốn an toàn hơn có thể lưu `image_size` vào `checkpoint_meta` rồi đọc lại ở `evaluate.py`).
-Trước khi dùng, chạy `tools/check_cache.py <cache> 448`: nếu có ca bị mất nhãn do crop giữa thì không dùng 448 hoặc cắt theo bbox phổi.
-**Kỳ vọng:** tốc độ ↑ ~20%; Dice ≈ không đổi (có thể +0.00–0.01 nhờ cửa sổ không pad).
-
-### 5.4 Chuẩn hóa khoảng cách z cho 2.5D (`--neighbor-mm`)
-
-**`common/data_pipeline/offline_builder.py`** — thêm cột `spacing_z` vào mỗi dòng `rows.append({...})`:
-
-```python
-                "spacing_z": round(float(meta.get("orig_spacing_xyz", [1.0, 1.0, 1.0])[2]), 3),
-```
-
-**`common/data_pipeline/dataset.py`:**
-
-```python
-    def _neighbor_indices(self, z, num_slices, step=1):
-        return [min(max(0, z + off * step), num_slices - 1) for off in range(-self.half_k, self.half_k + 1)]
-
-    # trong __getitem__, thay dòng z_indices = ...
-        step = 1
-        if self.neighbor_mm > 0 and "spacing_z" in row.index and float(row["spacing_z"]) > 0:
-            step = max(1, int(round(self.neighbor_mm / float(row["spacing_z"]))))
-        z_indices = self._neighbor_indices(z, num_slices, step)
-```
-
-**`common/eval3d/volume_inference.py`** — thêm tham số `neighbor_mm: float = 0.0` vào `predict_patient_volume` (và chuyển tiếp từ `evaluate_dataset_3d`, hai CLI):
-
-```python
-    step = max(1, int(round(neighbor_mm / spacing_z))) if neighbor_mm > 0 else 1
-    ...
-            z_idx = [min(max(0, z + off * step), num_slices - 1) for off in range(-half_k, half_k + 1)]
-```
-
-Với `--neighbor-mm 2.0`: lát 0.6 mm → bước 3; 1.25 mm → 2; ≥ 2.5 mm → 1. Train và eval **phải dùng cùng giá trị**. **Kỳ vọng:** +0.00–0.01 (cải thiện nhất quán, hiệu quả rõ hơn nếu tập có nhiều độ dày lát khác nhau).
-
-### 5.5 Resize ảnh về 1 mm bằng `area` thay `nearest` (tuỳ chọn, tốn công)
-
-```bash
-python common/data_pipeline/medical_prep.py build --nrrd-dir <nrrd> --cache-dir <cache_new> \
-  --interp area --extract-lungs --overwrite --workers 4
-```
-
-**Bắt buộc `--extract-lungs`:** `build_patient_cache` ghi lại `meta.json`; thiếu cờ này mất khóa `lung_ok` và có thể làm mask phổi không còn đồng bộ (lung zeros ⇒ ảnh toàn -1000 HU). Tách phổi chậm; chỉ làm khi đã xong các cải tiến rẻ hơn. **Kỳ vọng:** nhỏ (+0.00–0.01), ảnh nốt nhỏ sạch hơn.
-
-### 5.6 Tách tập test riêng (và hard-negative)
-
-**`offline_builder.build_dataset_index`** — thêm `test_split=0.0` vào chữ ký và thay khối chia tập:
-
-```python
-    if len(shuffled_pids) == 1:
-        val_patients, test_patients, train_patients = set(), set(), set(shuffled_pids)
-    else:
-        val_size = max(1, int(round(len(shuffled_pids) * val_split)))
-        test_size = int(round(len(shuffled_pids) * test_split)) if test_split > 0 else 0
-        val_patients = set(shuffled_pids[:val_size])                      # val giữ NGUYÊN như cũ
-        test_patients = set(shuffled_pids[val_size:val_size + test_size])
-        train_patients = set(shuffled_pids[val_size + test_size:])
-    ...
-        split = "val" if pid in val_patients else ("test" if pid in test_patients else "train")
-```
-
-Val giữ đúng tập ca cũ (cùng seed và `val_size`), chỉ phần train bị rút bớt. Dùng `--split test` trong `evaluate.py` / `eval_sweep.py` và **chỉ báo cáo test một lần** ở cuối.
-
-**Hard-negative mining (sau khi có model, mục 2.1):** thêm dòng âm tính vào `slices.csv` cho các lát model dự đoán dương tính giả trên tập train:
-
-```python
-# tools/add_hard_negatives.py  (rút gọn)
-import sys; from pathlib import Path
-import numpy as np, pandas as pd, torch
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common.eval3d.volume_inference import predict_patient_volume
-from mamba_unet.evaluate import load_mamba_unet_model
-
-cache, ckpt, MAXN = Path(sys.argv[1]), sys.argv[2], 10
-dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = load_mamba_unet_model(ckpt, dev)
-df = pd.read_csv(cache / "slices.csv")
-new = []
-for pid in sorted(df[df.split == "train"].patient_id.unique()):
-    r = predict_patient_volume(model, cache / pid, device=dev)
-    fp = (r["raw_mask_1mm"] > 0) & (r["gt_mask_1mm"] == 0)
-    cnt = fp.reshape(fp.shape[0], -1).sum(1)
-    have = set(df[df.patient_id == pid].z)
-    zs = [int(z) for z in np.argsort(-cnt) if cnt[z] >= 20 and int(z) not in have][:MAXN]
-    for z in zs:
-        new.append(dict(patient_id=pid, z=z, num_slices=int(fp.shape[0]), has_tumor=0,
-                        tumor_area_mm2=0.0, has_lung_mask=1, split="train",
-                        spacing_z=float(r["meta"].get("orig_spacing_xyz", [1, 1, 1])[2])))
-pd.concat([df, pd.DataFrame(new)]).to_csv(cache / "slices.csv", index=False)
-print("đã thêm", len(new), "lát âm tính khó")
-```
-
-Sao lưu `slices.csv` trước. Lưu ý `build_dataloaders` (§3.1) dựng lại chỉ mục khi tham số đổi ⇒ chạy script này **sau** khi tham số chỉ mục đã ổn định, và không đổi `--min-train-area/--neg-ratio` nữa. **Kỳ vọng:** FP/ca ↓ rõ rệt; Dice 3D ↑ nếu FP là nút thắt.
-
----
-
-## 6. Cải tiến **kiến trúc**
-
-### 6.1 Skip độ phân giải cao (H/2 và H/1) — thay đổi kiến trúc quan trọng nhất
-
-Mục tiêu: sửa P5 mà **không đụng backbone pretrained** (250 khóa giữ nguyên), mặc định tắt nên golden keys/test cũ vẫn đúng.
-
-**a) `mamba_unet/backbone/mamba_vision.py`**
-
-Trong `MambaVision.__init__`, thêm (sau `self.in_chans = in_chans`): `self.return_stem_feat = False`. Thay `forward_features`:
-
-```python
-    def forward_features(self, x: torch.Tensor) -> List[torch.Tensor]:
-        if self.return_stem_feat:
-            stem = self.patch_embed.conv_down[:3](x)            # (B, in_dim, H/2, W/2): Conv-BN-ReLU đầu tiên
-            x = self.patch_embed.conv_down[3:](stem)            # phần còn lại của PatchEmbed (dùng chung trọng số)
-        else:
-            stem = None
-            x = self.patch_embed(x)
-        features = []
-        for level in self.levels:
-            x, feat = level(x, return_feature_before_downsample=True)
-            features.append(feat)
-        return ([stem] + features) if stem is not None else features
-```
-
-**b) `mamba_unet/decoder.py`** — `UNetDecoder`:
-
-```python
-    def __init__(self, encoder_channels=None, num_classes=1, final_channels=32, act=None, init_bias=-4.0,
-                 high_res_skip: bool = False, stem_channels: int = 32, in_channels: int = 3):
-        super().__init__()
-        ...  # giữ nguyên c1..c4, up1, up2, up3
-        self.high_res_skip = bool(high_res_skip)
-        if self.high_res_skip:
-            mid = max(final_channels, 48)
-            self.up4 = UpBlock(c1, stem_channels, mid, use_conv_transpose=False, act=act)       # H/4 -> H/2
-            self.hr_stem = DoubleConv(in_channels, 16, act=act)                                  # nhánh H/1 từ ảnh gốc
-            self.up5 = UpBlock(mid, 16, final_channels, use_conv_transpose=False, act=act)      # H/2 -> H/1
-        else:
-            self.final_up = nn.Sequential(
-                nn.Upsample(scale_factor=4, mode="bilinear", align_corners=True),
-                DoubleConv(c1, final_channels, act=act),
-            )
-        self.outc = OutConv(final_channels, num_classes, init_bias=init_bias)
-
-    def forward(self, features: List[torch.Tensor], x_in: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if self.high_res_skip:
-            f0, f1, f2, f3, f4 = features
-        else:
-            f1, f2, f3, f4 = features
-        d1 = self.up1(f4, f3)
-        d2 = self.up2(d1, f2)
-        d3 = self.up3(d2, f1)
-        if self.high_res_skip:
-            x = self.up5(self.up4(d3, f0), self.hr_stem(x_in))
-        else:
-            x = self.final_up(d3)
-        return self.outc(x)
-```
-
-**c) `mamba_unet/model.py`** — `MambaUNet`:
-
-```python
-    def __init__(self, in_channels=3, num_classes=1, backbone="mamba_vision_T", pretrained=False,
-                 final_channels=32, act=None, init_bias=-4.0,
-                 high_res_skip: bool = False, drop_path_rate: float = 0.2,
-                 input_norm: Optional[Tuple[float, float]] = None, **kwargs):
-        ...
-        if isinstance(backbone, str):
-            self.encoder = build_mambavision_backbone(name=backbone, pretrained=pretrained,
-                                                      in_chans=in_channels, drop_path_rate=drop_path_rate)
-        ...
-        self.high_res_skip = bool(high_res_skip)
-        if self.high_res_skip:
-            self.encoder.return_stem_feat = True
-        self.decoder = UNetDecoder(
-            encoder_channels=encoder_channels, num_classes=num_classes, final_channels=final_channels,
-            act=act, init_bias=init_bias, high_res_skip=self.high_res_skip,
-            stem_channels=getattr(self.encoder, "in_dim", 32), in_channels=in_channels,
-        )
-        # chuẩn hóa đầu vào (xem §6.3); buffer không persistent => không thêm khóa vào state_dict
-        self.input_norm = input_norm is not None
-        mean, std = input_norm if self.input_norm else (0.0, 1.0)
-        self.register_buffer("_in_mean", torch.tensor(float(mean)), persistent=False)
-        self.register_buffer("_in_std", torch.tensor(float(std)), persistent=False)
-
-    def forward(self, x):
-        if self.input_norm:
-            x = (x - self._in_mean) / self._in_std
-        features = self.encoder(x)
-        return self.decoder(features, x)
-```
-
-(thêm `Tuple` vào `from typing import ...`). Trong `build_mamba_unet` đọc thêm `high_res_skip`, `drop_path_rate`, `input_norm` bằng `kwargs.get(...)` giống các tham số hiện có.
-
-**d) `train_main.py` / `trainer.py` / `evaluate.py`:**
-
-- `_add_mamba_specific_args`: thêm `--hr-skip` (store_true), `--drop-path` (float, 0.2), `--input-norm` (`nargs=2, type=float`, mặc định None).
-- `train_action`: `build_mamba_unet(..., high_res_skip=args.hr_skip, drop_path_rate=args.drop_path, input_norm=tuple(args.input_norm) if args.input_norm else None)`; ghi các giá trị này vào `model_meta` của `create_run`.
-- `MambaUNetTrainer.checkpoint_meta()`: thêm `"high_res_skip"`, `"input_norm"` (list hoặc None) vào dict (nhận từ `__init__`, ví dụ `high_res_skip: bool = False, input_norm=None`).
-- `evaluate.load_mamba_unet_model`: dựng model với `high_res_skip=bool(meta.get("high_res_skip", False))` và `input_norm=tuple(meta["input_norm"]) if meta.get("input_norm") else None`. **Nếu thiếu bước này, model HR sẽ được dựng sai ở eval.**
-
-**e) Khởi động từ checkpoint cũ (đỡ phải train từ đầu):**
-
-```bash
-... --hr-skip --init-weights mamba_unet/runs/<run_cũ>/best_model.pth --freeze-backbone-epochs 0
-```
-
-nhờ `strict=resume_training` ở §3.6, các khóa `up1–up3`, `outc` và toàn bộ backbone được nạp; `up4`, `up5`, `hr_stem` khởi tạo ngẫu nhiên.
-
-**Chi phí:** `hr_stem` + `up5` chạy ở độ phân giải đầy đủ nhưng kênh nhỏ (16/32); tổng FLOPs tương đương `final_up` cũ (DoubleConv 80→32 ở 512²), thêm `up4` ở 256². Bộ nhớ tăng nhẹ.
-**Kỳ vọng:** biên nét hơn, recall nốt nhỏ ↑ rõ nhất ở nhóm < 10 mm; +0.01–0.03 Dice lát, và 3D recall nốt nhỏ ↑. Đây là cải tiến có kỳ vọng lớn nhất về kiến trúc nhưng vẫn cần ablation.
-
-### 6.2 Cửa sổ cô lập ở stage 3–4 (P6) — các mức từ rẻ đến đắt
-
-1. **Rẻ:** dịch chuyển ngẫu nhiên (aug-level 2, §5.2) + `IMAGE_SIZE=448` (§5.3).
-2. **Trung bình:** dịch lưới cửa sổ (shifted window) ở các block lẻ: trong `MambaVisionLayer.forward` với `not self.conv`, dùng `torch.roll(x, (-ws//2, -ws//2), (2, 3))` trước `window_partition` cho block có chỉ số lẻ rồi roll ngược; **không cần mask** nếu nhận chấp nhận ghép vòng (cyclic) ở biên. Cần sắp xếp lại vòng lặp `for blk in self.blocks` thành `for j, blk in enumerate(...)` và partition/reverse **từng block** (tốn thêm một lần partition/reverse mỗi block). Thay đổi này không làm đổi khóa tham số ⇒ vẫn nạp được pretrained, nhưng *thay đổi hành vi so với pretrain* nên cần fine-tune đủ lâu.
-3. **Đắt:** thêm một khối attention toàn cục nhẹ ở bottleneck (H/32 = 14×14 token với 448) sau stage 4; thêm khóa mới (decoder/bottleneck).
-
-Chỉ làm bước 2–3 nếu `eval_sweep` cho thấy lỗi ở nốt lớn/ngữ cảnh rộng (vd. phân biệt mạch máu – nốt), vì với nốt nhỏ thì §6.1 hiệu quả hơn.
-
-### 6.3 Chuẩn hóa đầu vào (`--input-norm MEAN STD`)
-
-Tính mean/std trên vài trăm lát train đã qua cửa sổ HU + che phổi:
-
-```python
-from common.data_pipeline.dataset import LIDC25DDataset
-import numpy as np, random
-ds = LIDC25DDataset("/content/data/cache_1mm", split="train", augment=False)
-xs = np.stack([ds[i]["image"].numpy() for i in random.sample(range(len(ds)), 300)])
-print(xs.mean(), xs.std())
-```
-
-Rồi chạy `--input-norm <mean> <std>`. Chuẩn hóa nằm *trong* `MambaUNet.forward` nên train, eval và TTA tự nhất quán (buffer không persistent ⇒ không đổi `state_dict`/golden keys; `input_norm` phải nằm trong `checkpoint_meta`, §6.1d). Đặc biệt nên dùng cùng `--freeze-bn`. **Kỳ vọng:** nhỏ (+0.00–0.01), thấp rủi ro.
-
-### 6.4 Các hướng nâng cao hơn (làm sau, khi đã có số liệu)
-
-- **Deep supervision:** thêm đầu ra phụ 1×1 trên `d1`, `d2` (upsample về kích thước nhãn), loss phụ trọng số 0.3/0.15. Giúp gradient tới decoder sâu và nốt nhỏ ổn định hơn; thêm khóa mới (head phụ), cần sửa `forward` trả về tuple khi train.
-- **Nhãn mềm theo số reader:** hiện mask là *hợp* của các reader (biên mờ, có vùng chỉ 1 reader đánh dấu). Nếu export lại từng reader từ DICOM-SEG, dùng tỷ lệ đồng thuận (0, 0.25, …, 1) làm nhãn mềm cho BCE và ngưỡng ≥ 0.5 cho Dice. Giảm nhiễu nhãn, nhưng cần xây lại cache mask.
-- **Huấn luyện theo crop quanh nốt:** crop 224/448 với ~50% crop chứa u (cho phép batch lớn hơn, nhiều biến thiên hơn), suy luận toàn khung. Tương thích với `IMAGE_SIZE=448`.
-- **Hậu xử lý:** thay lọc theo "diện tích lát lớn nhất ≥ 20 mm²" bằng lọc theo xác suất trung bình của cụm + thể tích; điều chỉnh sau khi biết phân bố FP từ `eval_sweep`.
-
----
-
-## 7. Kế hoạch thực nghiệm (từng thay đổi một, mỗi cấu hình ≥ 2 seed nếu có thể)
-
-Nhiễu của val ±0.005–0.01 ⇒ chênh < 0.01 Dice **không** nên coi là cải thiện nếu chỉ 1 seed. Dùng `--epochs 30 --patience 8` cho ablation, rồi chạy bản cuối dài hơn. Lệnh cơ sở (từ nhật ký của bạn), chỉ thay phần in đậm theo từng bước:
-
-```bash
-DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
-  --cache-dir /content/data/cache_1mm --backbone mamba_vision_T --pretrained \
-  --freeze-backbone-epochs 3 --backbone-lr-mult 0.1 --activation relu --loss dice_bce \
-  --loss-params '{"bce_weight": 0.3, "dice_weight": 0.7, "pos_weight": 4.0}' \
-  --epochs 30 --patience 8 --batch-size 8 --lr 0.0001 --scheduler cosine --grad-clip 1.0 \
-  --workers 2 --seed 42 --run-name <TÊN_RUN> --tag colab_mamba \
-  <CỜ_THAY_ĐỔI>
-```
-
-| Run | `<CỜ_THAY_ĐỔI>` | Cần code ở | Kiểm tra bằng |
-|---|---|---|---|
-| R0 | *(baseline đã chạy)* + `eval_sweep` | §2 | 3D Dice, FP/ca, độ nhạy theo kích thước |
-| R1 | `--weight-decay 0.02` | §3.4 | gap train–val, Dice |
-| R2 | `--weight-decay 0.02 --ema 0.999` | §5.1 | độ mượt val, Dice |
-| R3 | `... --aug-level 2` | §5.2 | gap, Dice |
-| R4 | `... --min-train-area 5 --neg-ratio 0.5` | §3.1 | **`eval_sweep` 3D** (val 2D không so được) |
-| R5 | `... --tumor-union-p 0.0` | §3.2 | nốt dính thành ngực, gap |
-| R6 | `... --hr-skip --init-weights <best R4> --freeze-backbone-epochs 0` | §6.1 | độ nhạy nốt < 10 mm |
-| R7 | `DUNEAI_IMAGE_SIZE=448 ...` | §5.3 | thời gian/epoch, Dice |
-| R8 | chỉnh `pos_weight`/`--loss` theo P/R | — | P, R, `fp_comps` |
-| R9 | bản tốt nhất + **toàn bộ 1010 ca**, `--epochs 40` | — | **test set** (§5.6) |
-
-Thứ tự gợi ý nếu thời gian eo hẹp (Colab T4, mỗi run ~2.5–3.5 giờ): **R0 → R4 → R1+R2 → R3 → R6 → R9**.
-
-**Kỳ vọng tổng hợp (rất thô, chỉ để định hướng):** gộp các cải tiến có thể đưa Dice 3D/val lên vài điểm phần trăm (khoảng 0.02–0.06) và giảm đáng kể FP; mức cụ thể phụ thuộc vào kết quả `eval_sweep` của R0.
-
----
-
-## 8. Chỗ báo cáo `MAMBA_UNET_SYSTEM_REPORT.md` cần chỉnh cho khớp code
-
-| Vị trí trong báo cáo | Báo cáo ghi | Thực tế trong code |
-|---|---|---|
-| Mục 1.3 (MambaVisionMixer) | Quét hai chiều (bi-directional scan) | `selective_scan_fn` gọi **một lần, một chiều**; nhánh `z` là conv1d + SiLU **không qua SSM**, ghép với `y` bằng `torch.cat` (cách MambaVision bù cho tính nhân quả) |
-| Mục 1.2 và bảng `model.py` | "4 skip connections", UpBlock dùng ConvTranspose2d | 3 skip (`f1, f2, f3`; `f4` là bottleneck), upsample **bilinear** (`use_conv_transpose=False`); `final_up` = Upsample ×4 + DoubleConv |
-| Mục 1.4 | Bias -4 (≈1.8%) "tương ứng tần suất thực" | Mục 1.1 nói pixel dương tính chỉ 0.1–0.5%; 1.8% cao hơn prior thật. Bỏ "triệt để ngăn gradient bùng nổ" (chỉ ổn định giai đoạn đầu) |
-| Mục 1.5 | ~3.9 it/s, ~31 ảnh/s | Chỉ đúng khi backbone **đóng băng** (3m19s/epoch). Mở băng: 5m16s/epoch (~2.2 it/s) |
-| Mục 4.2 | Lọc cụm có thể tích < 20 mm³; loại từng lát < 20 mm² | `min_volume_mm3` mặc định **0**; code giữ cụm có **diện tích lát lớn nhất ≥ 20 mm²** (không cắt từng lát). Đơn vị 20 mm² vs mm³ bị lẫn |
-| Mục 4.3 và bảng tệp 32 | ASD, Specificity, "làm mịn biên" | Code chỉ có Dice, IoU, Precision, Recall, thể tích, HD95; hậu xử lý chỉ có lấp lỗ + lọc thành phần liên thông |
-| Mục 3.2 (`run_config.json` mẫu) | best 0.7412 ở epoch 21 | Run thực này: best **0.7456** ở epoch **30**, dừng sớm epoch 42 (`--epochs 50`) |
-| Mục 3.5 | best_model ~250 MB, fp16 ~60 MB | Ước lượng ~36M tham số ⇒ fp16 ~70 MB, checkpoint đầy đủ (kèm AdamW + history) lớn hơn nhiều; nên **đo lại** bằng `ls -lh` |
-| Mục 1.3/2.2 (`weight-decay`) | "giúp chống overfit" | Với AdamW wd=1e-4 gần như không tác dụng (xem P8) |
-| `model.py` docstring | 264 keys | selftest và báo cáo là 300 keys |
-
-Nên bổ sung vào báo cáo (đây là phần giá trị cho phản biện): phân tích gap train–val, ý nghĩa của val phẳng khi LR giảm, hạn chế của val 2D (P1), và bảng ablation R0–R9 ở mục 7.
