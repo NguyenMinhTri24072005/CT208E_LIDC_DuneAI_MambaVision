@@ -13,6 +13,7 @@ Quy tắc bất biến (spec mục 5.3):
       * Nhóm 'backbone': lr = base_lr * backbone_lr_mult (mặc định 0.1 khi pretrained, 1.0 khi scratch).
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from common.engine.base_trainer import BaseTrainer
+from configs.config import IMAGE_SIZE
 
 
 class MambaUNetTrainer(BaseTrainer):
@@ -94,12 +96,14 @@ class MambaUNetTrainer(BaseTrainer):
         num_cls = getattr(self, "num_classes", 1)
         freeze_ep = getattr(self, "freeze_backbone_epochs", 0)
         lr_mult = getattr(self, "backbone_lr_mult", 0.1)
+        img_sz = int(os.environ.get("DUNEAI_IMAGE_SIZE", IMAGE_SIZE))
         return {
             "arch": "mamba_unet",
             "backbone": bb,
             "activation": act,
             "in_channels": in_ch,
             "num_classes": num_cls,
+            "image_size": img_sz,
             "freeze_backbone_epochs": freeze_ep,
             "backbone_lr_mult": lr_mult,
             "model_config": {
@@ -107,6 +111,7 @@ class MambaUNetTrainer(BaseTrainer):
                 "activation": act,
                 "in_channels": in_ch,
                 "num_classes": num_cls,
+                "image_size": img_sz,
             },
         }
 

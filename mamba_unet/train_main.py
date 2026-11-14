@@ -27,11 +27,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from common.engine.cli_args import add_common_args
+from common.engine.cli_args import add_common_args, build_run_data_meta, validate_experiment_flags
 from common.engine.checkpoint_io import load_checkpoint_file
 from common.engine.run_manager import create_run, resolve_resume, RunHandle
 from common.engine.utils import seed_everything
 from common.paths import default_runs_root
+from configs.config import IMAGE_SIZE
 
 from mamba_unet.activations import DEFAULT_ACTIVATION, list_activations
 from mamba_unet.losses import DEFAULT_LOSS, DEFAULT_LOSS_PARAMS, get_loss, list_losses
@@ -73,6 +74,7 @@ def _load_yaml_config(path: str) -> Dict[str, Any]:
 
 def train_action(args):
     """Thực thi quy trình huấn luyện chính cho Mamba-UNet."""
+    validate_experiment_flags(args)
     seed_everything(args.seed)
 
     # Đọc cấu hình bổ sung từ YAML nếu có
@@ -80,19 +82,8 @@ def train_action(args):
 
     # 1. Chuẩn bị dữ liệu
     cache_dir = Path(args.cache_dir).resolve()
-    from common.data_pipeline.dataset import build_dataloaders
-    train_loader, val_loader = build_dataloaders(
-        cache_dir=cache_dir,
-        batch_size=args.batch_size,
-        num_workers=args.workers,
-        use_gpu_window=args.gpu_window,
-        lung_mask=not args.no_lung_mask,
-        augment=not args.no_augment,
-        limit_train=args.limit_train,
-        limit_val=args.limit_val,
-        rebuild_index=args.rebuild_index,
-        seed=args.seed,
-    )
+    from common.data_pipeline.dataset import build_dataloaders_from_args
+    train_loader, val_loader = build_dataloaders_from_args(args, cache_dir=cache_dir)
 
     # 2. Xây dựng mô hình
     model = build_mamba_unet(
@@ -126,24 +117,30 @@ def train_action(args):
             pass
 
     if run_handle is None:
+        img_sz = int(os.environ.get("DUNEAI_IMAGE_SIZE", IMAGE_SIZE))
+        run_args = dict(vars(args))
+        run_args["duneai_image_size"] = img_sz
         run_handle = create_run(
             arch="mamba_unet",
             runs_root=runs_root,
             run_name=args.run_name,
             tag=args.tag,
-            args=vars(args),
+            args=run_args,
             model_meta={
                 "class": "MambaUNet",
                 "backbone": args.backbone,
                 "pretrained": args.pretrained,
                 "activation": args.activation,
+                "image_size": img_sz,
+                "hr_skip": bool(getattr(args, "hr_skip", False)),
             },
-            data_meta={"cache_dir": str(cache_dir)},
+            data_meta=build_run_data_meta(args, cache_dir, img_sz),
             loss_meta={"name": args.loss, "params": loss_params},
             optimizer_meta={
                 "name": "AdamW",
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
+                "ema": float(getattr(args, "ema", 0.0)),
                 "backbone_lr_mult": args.backbone_lr_mult,
                 "freeze_backbone_epochs": args.freeze_backbone_epochs,
             },
@@ -393,6 +390,11 @@ def _add_mamba_specific_args(parser: argparse.ArgumentParser):
         type=float,
         default=0.1,
         help="Hệ số nhân LR cho backbone so với decoder (mặc định 0.1)",
+    )
+    mamba_grp.add_argument(
+        "--hr-skip",
+        action="store_true",
+        help="Bật nhánh Skip độ nét cao H/2, H/1 vào Decoder (Run 3; mặc định R0: tắt)",
     )
 
 

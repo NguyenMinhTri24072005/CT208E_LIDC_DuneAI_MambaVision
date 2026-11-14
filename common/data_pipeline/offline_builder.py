@@ -32,16 +32,24 @@ from common.data_pipeline.medical_prep import load_cached, lung_cache_path
 def build_dataset_index(
     cache_dir,
     out_csv_path=None,
-    tumor_size_low_lim=TUMOR_SIZE_LOW_LIM,
-    zero_sl_ratio=ZERO_SL_RATIO,
+    tumor_size_low_lim=None,
+    zero_sl_ratio=None,
     val_split=VAL_SPLIT,
     seed=SEED,
     require_lung=True,
+    min_train_area=TUMOR_SIZE_LOW_LIM,
+    min_neg_per_case=1,
+    neg_ratio=ZERO_SL_RATIO,
+    keep_all_train_neg=False,
 ):
     """
     Quét thư mục cache_1mm, lọc lát cắt theo tiêu chuẩn y khoa của DuneAI và xuất slices.csv.
     Lưu ý: mask_1mm.npy đã ở tỷ lệ 1mm/pixel nên 1 pixel = 1.0 mm^2.
     """
+    area_thresh = float(min_train_area if tumor_size_low_lim is None else tumor_size_low_lim)
+    ratio = float(neg_ratio if zero_sl_ratio is None else zero_sl_ratio)
+    min_neg_per_case = int(min_neg_per_case)
+    keep_all_train_neg = bool(keep_all_train_neg)
     cache_dir = Path(cache_dir)
     if out_csv_path is None:
         out_csv_path = cache_dir / "slices.csv"
@@ -107,7 +115,7 @@ def build_dataset_index(
             has_l = int(lung_pixels[z]) > 0
 
             if area > 0.0:
-                if area < tumor_size_low_lim:
+                if area < area_thresh:
                     stats["dropped_small_tumor"] += 1
                     continue
                 pos_slices.append((z, area))
@@ -117,24 +125,35 @@ def build_dataset_index(
                     continue
                 neg_candidates.append((z, 0.0))
 
-        # Cân bằng lát cắt âm tính (Negative Sampling) theo ZERO_SL_RATIO
+        # Cân bằng lát cắt âm tính (Negative Sampling) theo tỷ lệ và sàn ca bệnh
         if len(pos_slices) > 0:
-            num_neg_keep = max(1, int(round(len(pos_slices) * zero_sl_ratio))) if zero_sl_ratio > 0 else 0
+            num_neg_keep = max(min_neg_per_case, int(round(len(pos_slices) * ratio))) if ratio > 0 else 0
         else:
-            num_neg_keep = 1 if len(neg_candidates) > 0 else 0
+            num_neg_keep = min_neg_per_case if len(neg_candidates) > 0 else 0
+        num_neg_keep = min(len(neg_candidates), num_neg_keep)
 
         if len(neg_candidates) > num_neg_keep:
             kept_neg = sorted(rng.sample(neg_candidates, num_neg_keep), key=lambda x: x[0])
-            stats["dropped_neg_sampled"] += len(neg_candidates) - num_neg_keep
+            kept_neg_z = {z for z, _ in kept_neg}
+            pool_only_neg = [item for item in neg_candidates if item[0] not in kept_neg_z]
         else:
             kept_neg = neg_candidates
+            pool_only_neg = []
 
         split = "val" if pid in val_patients else "train"
-        selected = [(z, 1, area) for z, area in pos_slices] + [(z, 0, area) for z, area in kept_neg]
+        if keep_all_train_neg and split == "train":
+            selected = (
+                [(z, 1, area, 1) for z, area in pos_slices]
+                + [(z, 0, area, 1) for z, area in kept_neg]
+                + [(z, 0, area, 0) for z, area in pool_only_neg]
+            )
+        else:
+            stats["dropped_neg_sampled"] += len(pool_only_neg)
+            selected = [(z, 1, area, 1) for z, area in pos_slices] + [(z, 0, area, 1) for z, area in kept_neg]
         selected.sort(key=lambda x: x[0])
 
-        for z, has_tumor, area in selected:
-            rows.append({
+        for z, has_tumor, area, in_static in selected:
+            row_dict = {
                 "patient_id": pid,
                 "z": int(z),
                 "num_slices": num_slices,
@@ -142,7 +161,10 @@ def build_dataset_index(
                 "tumor_area_mm2": round(float(area), 2),
                 "has_lung_mask": int(has_lung),
                 "split": split,
-            })
+            }
+            if keep_all_train_neg:
+                row_dict["in_static"] = int(in_static)
+            rows.append(row_dict)
 
     df = pd.DataFrame(rows)
     out_csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,11 +180,11 @@ def build_dataset_index(
     print("=" * 50)
     print(f"Tổng số bệnh nhân : {stats['patients_total']} ({stats['patients_train']} Train | {stats['patients_val']} Val)")
     print(f"Tổng lát cắt giữ lại: {len(df)} ({train_count} Train | {val_count} Val)")
-    print(f"  + Dương tính (Có u >= {tumor_size_low_lim} mm²): {pos_count}")
+    print(f"  + Dương tính (Có u >= {area_thresh} mm²): {pos_count}")
     print(f"  + Âm tính (Không u, có phổi)       : {neg_count}")
     print("Các lát cắt đã lọc bỏ:")
     print(f"  - Không chứa nhu mô phổi           : {stats['dropped_no_lung']}")
-    print(f"  - Khối u quá nhỏ (< {tumor_size_low_lim} mm²)     : {stats['dropped_small_tumor']}")
+    print(f"  - Khối u quá nhỏ (< {area_thresh} mm²)     : {stats['dropped_small_tumor']}")
     print(f"  - Âm tính dư thừa (Negative Sample): {stats['dropped_neg_sampled']}")
     print(f"✅ Đã xuất bảng chỉ mục tại: {out_csv_path}")
     return df, stats
@@ -192,9 +214,33 @@ def _cmd_selftest(_):
 
         df, stats = build_dataset_index(tmp)
         assert stats["dropped_no_lung"] == 16, f"Sai lọc phổi: {stats}"
-        assert stats["dropped_small_tumor"] == 4, f"Sai lọc u nhỏ: {stats}"
+        assert stats["dropped_small_tumor"] == 4, f"Sai lọc u nhỏ (mặc định R0=20 mm²): {stats}"
         assert (df["has_tumor"] == 1).sum() == 8, "Phải giữ đúng 8 lát có u hợp lệ"
         assert set(df["split"].unique()) == {"train", "val"}, "Phải có cả tập train và val"
+
+        # Kiểm tra cấu hình Run 1: ngưỡng 5.0 mm², ca không u được cấp min_neg_per_case=4 và giữ kho âm train
+        p_empty = tmp / "LIDC-IDRI-0005"
+        p_empty.mkdir(parents=True)
+        np.save(p_empty / "image_1mm.npy", np.full((10, 100, 100), -800, dtype=np.int16))
+        np.save(p_empty / "mask_1mm.npy", np.zeros((10, 100, 100), dtype=np.uint8))
+        lung_e = np.zeros((10, 100, 100), dtype=np.uint8)
+        lung_e[2:8, 10:90, 10:90] = 1
+        np.save(p_empty / "lung_1mm.npy", lung_e)
+        with open(p_empty / "meta.json", "w", encoding="utf-8") as f:
+            json.dump({"orig_spacing_xyz": [0.7, 0.7, 1.5], "lung_ok": True}, f)
+
+        df_r1, stats_r1 = build_dataset_index(
+            tmp,
+            out_csv_path=tmp / "slices_r1.csv",
+            min_train_area=5.0,
+            neg_ratio=0.5,
+            min_neg_per_case=4,
+            keep_all_train_neg=True,
+        )
+        assert stats_r1["dropped_small_tumor"] == 0, f"Run 1 (5.0 mm²) phải giữ lát 10 mm²: {stats_r1}"
+        assert (df_r1["has_tumor"] == 1).sum() == 12, "Phải giữ đủ 12 lát có u (>= 5.0 mm²)"
+        empty_rows = df_r1[df_r1["patient_id"] == "LIDC-IDRI-0005"]
+        assert (empty_rows["in_static"] == 1).sum() >= 4, "Ca không u phải được giữ >= 4 lát âm tĩnh"
         print("✅ selftest offline_builder: OK!")
     finally:
         shutil.rmtree(tmp)
@@ -207,8 +253,22 @@ if __name__ == "__main__":
     b = sub.add_parser("build", help="Tạo file slices.csv từ thư mục cache_1mm")
     b.add_argument("--cache-dir", default=str(ROOT / "data" / "cache_1mm"))
     b.add_argument("--out-csv", default=None)
+    b.add_argument("--min-train-area", type=float, default=TUMOR_SIZE_LOW_LIM)
+    b.add_argument("--neg-ratio", type=float, default=ZERO_SL_RATIO)
+    b.add_argument("--min-neg-per-case", type=int, default=1)
+    b.add_argument("--keep-all-train-neg", action="store_true")
     b.add_argument("--no-require-lung", action="store_true", help="Không lọc bỏ lát thiếu phổi")
-    b.set_defaults(fn=lambda a: build_dataset_index(a.cache_dir, a.out_csv, require_lung=not a.no_require_lung))
+    b.set_defaults(
+        fn=lambda a: build_dataset_index(
+            a.cache_dir,
+            a.out_csv,
+            require_lung=not a.no_require_lung,
+            min_train_area=a.min_train_area,
+            neg_ratio=a.neg_ratio,
+            min_neg_per_case=a.min_neg_per_case,
+            keep_all_train_neg=a.keep_all_train_neg,
+        )
+    )
 
     s = sub.add_parser("selftest", help="Kiểm thử logic bằng dữ liệu giả lập")
     s.set_defaults(fn=_cmd_selftest)

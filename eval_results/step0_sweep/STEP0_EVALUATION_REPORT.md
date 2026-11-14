@@ -1,7 +1,7 @@
 # 📋 BÁO CÁO KẾT QUẢ ĐO LƯỜNG BƯỚC 0 (STEP 0 MEASUREMENT REPORT)
 **Mô hình đánh giá**: `best_model.pth`
 **Thư mục checkpoint**: `/content/drive/MyDrive/COMPUTER SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/runs/mamba_colab_500item_25epoch_extra_test/best_model.pth`
-**Thời gian thực hiện**: 2026-11-11 10:34:32
+**Thời gian thực hiện**: 2026-11-13 17:01:57
 **Tập dữ liệu**: Validation set (75 bệnh nhân)
 
 ---

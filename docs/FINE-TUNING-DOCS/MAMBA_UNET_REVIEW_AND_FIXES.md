@@ -105,6 +105,11 @@ DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
 ```
 *(Mã nguồn script `tools/eval_sweep_v2.py` được cung cấp chi tiết tại **Phụ lục A**).*
 
+* **Kết quả thực đo $R_{0b}$ trên 75 ca Val ([`R0B_BASELINE_REPORT.md`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/eval_results/step0_r0b_sweep/R0B_BASELINE_REPORT.md))**:
+  * **Mốc đối chứng chuẩn cho Run 1 $(Th=0.6,\; A_{\min}=6.0\text{ mm}^2,\; V_{\min}=10.0\text{ mm}^3)$**: $\text{Dice}_{3D} = \mathbf{0.3479}$, $\text{Precision} = 0.3863$, $\text{Recall} = 0.3850$, $\text{FP/ca} = \mathbf{5.15}$, tổng nốt bắt được $116/203$ ($57.1\%$).
+  * **Độ nhạy theo dải đường kính tại $(Th=0.6, A \ge 6.0, V \ge 10.0)$**: `[0-5) mm`: **$6/59$ ($10.2\%$)** | `[5-10) mm`: $71/99$ ($71.7\%$) | `[10-20) mm`: $31/37$ ($83.8\%$) | `>=20 mm`: $8/8$ ($100.0\%$).
+  * **Đỉnh $\text{Dice}_{3D}$ lưới 27 cấu hình**: $0.3774$ tại $(Th=0.6, A \ge 20.0, V \ge 20.0)$ với $2.83\text{ FP/ca}$.
+
 ---
 
 ## 3. CÁC GIẢI PHÁP KỸ THUẬT CỐT LÕI (DỮ LIỆU & TỐI ƯU HÓA)
@@ -324,8 +329,8 @@ Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình 
 | Giai đoạn | Nội dung trọng tâm | Trạng thái | Tiến độ hoàn thành |
 | :--- | :--- | :---: | :---: |
 | **Run 0 ($R_0$)** | Baseline đo lường cơ sở trên 75 ca Val | **ĐÃ XONG** | `[x]` **100%** (Đã đo xong 3D: Dice 0.3771) |
-| **Run 0b ($R_{0b}$)** | Đo đối chứng với bộ lọc mới ($6\text{ mm}^2, V_{\min}=10$) | **ĐANG TRIỂN KHAI** | `[ ]` **1/4 mục** (Đã tạo `tools/eval_sweep_v2.py` & cập nhật notebook Colab) |
-| **Run 1 (`R1_Data_Loss`)** | Dữ liệu u nhỏ 5.0, Sampler động, pos_weight 2.0, ảnh 448 | **CHỜ TRIỂN KHAI** | `[ ]` **0/11 mục** |
+| **Run 0b ($R_{0b}$)** | Đo đối chứng với bộ lọc mới ($6\text{ mm}^2, V_{\min}=10$) | **ĐÃ XONG** | `[x]` **4/4 mục** (`Dice 0.3479 \| FP/ca 5.15 \| <5mm 10.2%`) |
+| **Run 1 (`R1_Data_Loss`)** | Dữ liệu u nhỏ 5.0, Sampler động, pos_weight 2.0, ảnh 448 | **CHỜ CHẠY COLAB** | `[ ]` **7/11 mục** *(Đã xong mã nguồn R0-parity & test cục bộ)* |
 | **Run 2 (`R2_Regularization`)** | Weight Decay 0.02 (4 nhóm), EMA 0.999, Augment cấp 2 | **CHƯA BẮT ĐẦU** | `[ ]` **0/8 mục** |
 | **Run 3 (`R3_HR_Skip`)** | Nhánh Skip độ nét cao $H/2, H/1$ vào Decoder cứu nốt nhỏ | **CHƯA BẮT ĐẦU** | `[ ]` **0/8 mục** |
 | **Run 4 (`R4_Final_1010`)** | Toàn bộ 1,010 ca, tách 10% Test độc lập, nghiệm thu đồ án | **CHƯA BẮT ĐẦU** | `[ ]` **0/7 mục** |
@@ -356,9 +361,9 @@ Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình 
   * Ghi nhận mốc $\text{Dice}_{3D}$, $\text{FP/ca}$ và độ nhạy nốt $< 5\text{ mm}$ tại cấu hình $(Th=0.6, A_{\min}=6.0, V_{\min}=10)$ để so sánh trực tiếp với Run 1.
 * **Checklist công việc Giai đoạn 0 (Run 0b)**:
   - [x] Tạo mới tệp `tools/eval_sweep_v2.py` từ mã nguồn Phụ lục A (và tích hợp cell chạy Run 0b vào [`colab_step0_measurement.ipynb`](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/mamba_unet/notebooks/colab_step0_measurement.ipynb)).
-  - [ ] Chạy lệnh quét lưới đối chứng đa ngưỡng trên Colab cho checkpoint $R_0$.
-  - [ ] Tải về và lưu trữ 2 tệp kết quả: `sweep_r0b_patients.csv` và `sweep_r0b_nodules.csv`.
-  - [ ] Chốt số liệu cơ sở tại cấu hình $(Th=0.6, A_{\min}=6.0, V_{\min}=10)$ làm mốc đối chuẩn cho Run 1.
+  - [x] Chạy lệnh quét lưới đối chứng đa ngưỡng trên Colab cho checkpoint $R_0$.
+  - [x] Tải về và lưu trữ 2 tệp kết quả: `sweep_r0b_patients.csv` và `sweep_r0b_nodules.csv`.
+  - [x] Chốt số liệu cơ sở tại cấu hình $(Th=0.6, A_{\min}=6.0, V_{\min}=10)$ làm mốc đối chuẩn cho Run 1 (`Dice=0.3479`, `Prec=0.3863`, `Rec=0.3850`, `FP/ca=5.15`, `Nốt=116/203`, `<5mm=10.2%`).
 
 ---
 
@@ -444,16 +449,24 @@ Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình 
        "image_size": int(os.environ.get("DUNEAI_IMAGE_SIZE", 512)),
        ```
 
+* **Nguyên tắc tái lập $R_0$ & cách ly Run**:
+  Mọi cờ mới đều mang **giá trị mặc định đúng với $R_0$** (`--min-train-area 20.0`, `--neg-ratio 0.25`, `--min-neg-per-case 1`, `--dynamic-neg` tắt, `--weight-decay 1e-4`, `--ema 0.0`, `--aug-level 1`, `--hr-skip` tắt, `DUNEAI_IMAGE_SIZE=512`), nên lệnh `train` không cờ luôn tái tạo $R_0$. Mỗi Run nhận `--cache-dir` riêng để cô lập `slices.csv` và ghi đủ mọi cờ vào `run_config.json`.
+
 * **Lệnh thực thi trên Google Colab**:
   ```bash
-  # Bước 1.1: Tạo lại bảng chỉ mục lát cắt với ngưỡng diện tích 5.0 mm²
+  # Bước 1.1: Tạo bảng chỉ mục lát cắt riêng cho Run 1 (giữ kho âm train cho PosAllNegResample)
   python -m common.data_pipeline.offline_builder build \
-    --cache-dir /content/data/cache_1mm \
-    --min-train-area 5.0 --neg-ratio 0.5 --min-neg-per-case 4
+    --cache-dir /content/data/cache_1mm_r1 \
+    --min-train-area 5.0 --neg-ratio 0.5 --min-neg-per-case 4 --keep-all-train-neg
 
-  # Bước 1.2: Huấn luyện Run 1
+  # Bước 1.2: Huấn luyện Run 1 (truyền tường minh toàn bộ cờ thử nghiệm Run 1)
   DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_main train \
-    --cache-dir /content/data/cache_1mm \
+    --cache-dir /content/data/cache_1mm_r1 \
+    --min-train-area 5.0 \
+    --neg-ratio 0.5 \
+    --min-neg-per-case 4 \
+    --dynamic-neg \
+    --keep-all-train-neg \
     --backbone mamba_vision_T \
     --pretrained \
     --freeze-backbone-epochs 3 \
@@ -467,14 +480,14 @@ Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình 
     --lr 0.0001 \
     --scheduler cosine \
     --grad-clip 1.0 \
-    --workers 2 \
+    --workers 4 \
     --seed 42 \
     --run-name R1_Data_Loss \
     --tag colab_mamba
 
   # Bước 1.3: Đánh giá 3D so sánh trực diện với R0b
   DUNEAI_MAMBA_BACKEND=cuda python tools/eval_sweep_v2.py \
-    --cache-dir /content/data/cache_1mm \
+    --cache-dir /content/data/cache_1mm_r1 \
     --checkpoint mamba_unet/runs/R1_Data_Loss/best_model.pth \
     --split val \
     --thresholds 0.5 0.6 0.7 \
@@ -483,21 +496,21 @@ Bảng tổng hợp tiến độ thời gian thực để theo dõi nhanh tình 
     --out-prefix sweep_r1
   ```
 * **Tiêu chí nghiệm thu Giai đoạn 1**:
-  * Kiểm định Bootstrap ghép cặp so với $R_{0b}$: $\Delta \text{Dice}_{3D} > +0.05$ với mức ý nghĩa $p < 0.05$.
-  * Tỷ lệ báo động giả: $\text{FP/ca} \le 1.8$ (giảm từ $2.91$ của $R_0$).
-  * Độ nhạy nốt rất nhỏ ($< 5\text{ mm}$): Tăng từ $3.39\%$ lên $> 30\%$.
+  * Kiểm định Bootstrap ghép cặp so với $R_{0b}$ (`Dice 0.3479`, `FP/ca 5.15`, `<5mm 10.2%`): $\Delta \text{Dice}_{3D} > +0.05$ với mức ý nghĩa $p < 0.05$.
+  * Tỷ lệ báo động giả: $\text{FP/ca} \le 1.8$ (giảm mạnh từ `5.15` của $R_{0b}$ / `2.91` của $R_0$).
+  * Độ nhạy nốt rất nhỏ ($< 5\text{ mm}$): Tăng từ $10.2\%$ ($R_{0b}$) lên $> 30\%$.
 * **Checklist công việc Giai đoạn 1 (Run 1 — `R1_Data_Loss`)**:
-  - [ ] **[1.1 Cấu hình ảnh]**: Sửa `configs/config.py` đọc biến môi trường `DUNEAI_IMAGE_SIZE`.
-  - [ ] **[1.2 CLI đối số]**: Bổ sung `--min-train-area`, `--neg-ratio`, `--min-neg-per-case` vào `common/engine/cli_args.py`.
-  - [ ] **[1.3 Lập chỉ mục]**: Cập nhật `common/data_pipeline/offline_builder.py` hạ ngưỡng u nhỏ xuống $5.0\text{ mm}^2$ và cấp tối thiểu `min_neg_per_case` cho ca không u.
-  - [ ] **[1.4 Sampler & Mask]**: Khai báo `PosAllNegResample`, vá nhãn `msk_stack & (keep > 0)`, tích hợp sampler vào `build_dataloaders` trong `common/data_pipeline/dataset.py`.
-  - [ ] **[1.5 Vòng lặp Train]**: Gọi `train_loader.sampler.set_epoch(epoch)` trong `common/engine/base_trainer.py`.
-  - [ ] **[1.6 Metadata Checkpoint]**: Lưu `"image_size"` vào `checkpoint_meta()` trong `mamba_unet/trainer.py`.
-  - [ ] **[Kiểm thử cục bộ]**: Chạy selftest trên các module đã sửa (`offline_builder.py`, `dataset.py`, `trainer.py`).
-  - [ ] **[Colab 1.1]**: Chạy lệnh tạo lại bảng chỉ mục `slices.csv` trên Colab với ngưỡng $5.0\text{ mm}^2$.
-  - [ ] **[Colab 1.2]**: Chạy huấn luyện Run 1 (`R1_Data_Loss`) 40 epoch với `pos_weight=2.0`.
+  - [x] **[1.1 Cấu hình ảnh]**: Sửa `configs/config.py` đọc biến môi trường `DUNEAI_IMAGE_SIZE` (mặc định `512`).
+  - [x] **[1.2 CLI đối số]**: Bổ sung `--min-train-area 20.0`, `--neg-ratio 0.25`, `--min-neg-per-case 1`, `--dynamic-neg`, `--keep-all-train-neg`, `--tumor-union-p 1.0`, `--aug-level 1`, `--ema 0.0`, `--slices-csv` (mặc định $= R_0$) vào `common/engine/cli_args.py` & `--hr-skip` vào `mamba_unet/train_main.py`, ghi đủ mọi cờ vào `run_config.json`.
+  - [x] **[1.3 Lập chỉ mục]**: Cập nhật `common/data_pipeline/offline_builder.py` hỗ trợ `--min-train-area`, `--min-neg-per-case`, `--keep-all-train-neg` (mặc định $R_0$).
+  - [x] **[1.4 Sampler & Mask]**: Khai báo `PosAllNegResample`, vá nhãn `msk_stack` theo `keep > 0`, tích hợp `build_dataloaders` & `build_dataloaders_from_args` trong `common/data_pipeline/dataset.py` + nối vào `train_main.py`.
+  - [x] **[1.5 Vòng lặp Train]**: Gọi `train_loader.sampler.set_epoch(epoch)` và ghi spec run thực tế trong `common/engine/base_trainer.py`.
+  - [x] **[1.6 Metadata Checkpoint]**: Lưu `"image_size"` vào `checkpoint_meta()` trong `mamba_unet/trainer.py`.
+  - [x] **[Kiểm thử cục bộ]**: PASS toàn bộ `tests/run_all.py` (26/26), `tests/test_run1_data_pipeline.py` + `tests/test_auto_sync_drive.py` (7/7), và `eval_sweep_v2.py --selftest`.
+  - [ ] **[Colab 1.1]**: Chạy lệnh tạo lại bảng chỉ mục `slices.csv` trên Colab vào `--cache-dir` riêng với ngưỡng $5.0\text{ mm}^2$ và `--keep-all-train-neg`.
+  - [ ] **[Colab 1.2]**: Chạy huấn luyện Run 1 (`R1_Data_Loss`) 40 epoch với `pos_weight=2.0`, `DUNEAI_IMAGE_SIZE=448`, `--dynamic-neg`.
   - [ ] **[Colab 1.3]**: Chạy đánh giá 3D đa ngưỡng `tools/eval_sweep_v2.py` cho Run 1.
-  - [ ] **[Nghiệm thu R1]**: Kiểm tra đạt $\Delta \text{Dice}_{3D} > +0.05$ ($p < 0.05$), $\text{FP/ca} \le 1.8$, độ nhạy nốt $< 5\text{ mm} > 30\%$.
+  - [ ] **[Nghiệm thu R1]**: Kiểm tra đạt $\Delta \text{Dice}_{3D} > +0.05$ ($p < 0.05$) so với $R_{0b}$, $\text{FP/ca} \le 1.8$, độ nhạy nốt $< 5\text{ mm} > 30\%$.
 
 ---
 
@@ -806,7 +819,7 @@ DUNEAI_IMAGE_SIZE=448 DUNEAI_MAMBA_BACKEND=cuda python -u -m mamba_unet.train_ma
 
 | Phiên chạy | Tổ hợp tham số & Kỹ thuật kích hoạt | Sửa ở mục | Tiêu chí quyết định (Decision Rules) |
 | :--- | :--- | :---: | :--- |
-| **Run 0 ($R_0$)**<br>*(Đã xong)* | • Ảnh 512, BS 8, min-train-area 20, neg-ratio 0.25, pos-weight 4.0.<br>• Chạy $R_{0b}$ đo lại với bộ lọc mới ($6\text{ mm}^2, V_{\min} = 10$). | §2, §2.3, §8.0 | **Mốc đối chứng cơ sở**:<br>$\text{Dice}_{3D} = 0.3771$, $\text{FP/ca} = 2.91$. Độ nhạy nốt $< 5\text{ mm}$ chỉ $3.39\%$. |
+| **Run 0 ($R_0$ & $R_{0b}$)**<br>*(Đã xong)* | • Ảnh 512, BS 8, min-train-area 20, neg-ratio 0.25, pos-weight 4.0.<br>• Đã đo $R_{0b}$ trên 75 ca Val với bộ lọc mới ($Th=0.6, A \ge 6\text{ mm}^2, V \ge 10\text{ mm}^3$). | §2, §2.2, §8.0 | **Mốc đối chứng cơ sở thực đo**:<br>• $R_0$ ($A \ge 20, V \ge 0$): $\text{Dice}_{3D} = 0.3771$, $2.91\text{ FP/ca}$, $<5\text{ mm}: 3.4\%$.<br>• **$R_{0b}$ ($A \ge 6, V \ge 10$)**: **$\text{Dice}_{3D} = 0.3479$**, **$5.15\text{ FP/ca}$**, nốt $116/203$ ($57.1\%$), **$<5\text{ mm}: 10.2\%$ ($6/59$)**. |
 | **Run 1 (`R1_Data_Loss`)** | • `DUNEAI_IMAGE_SIZE=448`<br>• `--min-train-area 5.0 --neg-ratio 0.5`<br>• Sampler `PosAllNegResample` + `min_neg_per_case = 4`<br>• `--loss-params '{"pos_weight": 2.0}'` | §3.1, §3.1b, §4, §5.3, §8.1 | **Tiêu chí chấp nhận**:<br>• $\Delta \text{Dice}_{3D} > +0.05$ so với $R_{0b}$ (ghép cặp bootstrap $p < 0.05$).<br>• $\text{FP/ca} \le 1.8$. Độ nhạy nốt $< 5\text{ mm}$ tăng $> 30\%$. |
 | **Run 2 (`R2_Regularization`)** | • Kế thừa toàn bộ cấu hình **Run 1**<br>• Thêm `--weight-decay 0.02` (4 nhóm param)<br>• Thêm `--ema 0.999`<br>• Thêm `--aug-level 2` (Affine $\pm 32\text{ px}$ + Jitter) | §3.4, §5.1, §5.2, §8.2 | **Tiêu chí chấp nhận**:<br>• Gap Train-Val thu hẹp từ $13\%$ xuống $\le 6\%$.<br>• $\text{FP/ca} \le 1.2$. $\text{Dice}_{3D}$ tăng thêm $+0.02\text{--}0.04$ so với Run 1. |
 | **Run 3 (`R3_HR_Skip`)** | • Kế thừa toàn bộ cấu hình **Run 2**<br>• Kích hoạt `--hr-skip` ($H/2, H/1$ Skip connections)<br>• Pretrained ImageNet chuẩn | §6.1, §8.3 | **Tiêu chí chấp nhận**:<br>• Kiểm định McNemar trên nốt $< 10\text{ mm}$ đạt $p < 0.05$.<br>• Độ nhạy nốt $< 5\text{ mm}$ đạt $> 45\%$. $\text{Dice}_{3D} \ge 0.58$. |

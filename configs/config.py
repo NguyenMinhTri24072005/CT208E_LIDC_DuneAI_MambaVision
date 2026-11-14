@@ -6,10 +6,12 @@ Giữ nguyên vẹn các hằng số không gian & chuẩn hóa lát cắt từ 
 Không chứa siêu tham số huấn luyện của từng thí nghiệm (được quản lý qua YAML và CLI).
 """
 
+import os
+
 # ==========================================
 # THÔNG SỐ KHÔNG GIAN & VẬT LÝ Y TẾ
 # ==========================================
-IMAGE_SIZE = 512
+IMAGE_SIZE = int(os.environ.get("DUNEAI_IMAGE_SIZE", 512))
 
 # Cửa sổ Hounsfield cho mô phổi (Lung Window)
 WINDOW_WIDTH = 1500

@@ -177,6 +177,12 @@ class BaseTrainer:
             except Exception:
                 win_w, win_l, resamp, tumor_lim, zero_r, val_sp, img_sz = 1500, -600, 25, 20.0, 0.25, 0.15, 512
 
+            data_cfg = (self.run_handle.config.get("data", {}) if self.run_handle else {}) or {}
+            tumor_lim = data_cfg.get("min_train_area", tumor_lim)
+            zero_r = data_cfg.get("neg_ratio", zero_r)
+            img_sz = data_cfg.get("image_size", img_sz)
+            dyn_neg = data_cfg.get("dynamic_neg", False)
+
             data_spec_md = f"""# 📊 HỒ SƠ DỮ LIỆU & CẤU HÌNH HUẤN LUYỆN
 ## Phiên chạy: `{self.save_dir.name}`
 *Khởi tạo lúc: {now_str}*
@@ -184,11 +190,11 @@ class BaseTrainer:
 ### 1. Phân Chia Dữ Liệu & Quy Chuẩn Tiền Xử Lý Y Tế
 - **Kiến trúc mô hình**: `{arch_name}` (Backbone: `{bb_name}`, Activation: `{act_name}`)
 - **Chiến lược phân chia**: Patient-Level Split, Zero Patient Leakage (Val Split: {val_sp * 100:.0f}%)
-- **Quy chuẩn lọc khối u**: `TUMOR_SIZE_LOW_LIM = {tumor_lim} mm²` (loại bỏ nốt u nhỏ hơn {tumor_lim} mm²)
+- **Quy chuẩn lọc khối u**: `min_train_area = {tumor_lim} mm²` (loại bỏ lát u nhỏ hơn {tumor_lim} mm²)
 - **Chuẩn hóa Hounsfield Unit (HU)**:
   - Cửa sổ phổi: `WINDOW_WIDTH = {win_w} HU`, `WINDOW_LEVEL = {win_l} HU` (Dải quan sát: [{win_l - win_w // 2}, {win_l + win_w // 2}] HU)
   - Lượng tử hóa bước nhảy: `RESAMPLING_STEP = {resamp} HU` (làm tròn {resamp} HU mỗi bước để giảm nhiễu hạt máy quét CT và nén dữ liệu cache)
-- **Tỷ lệ lấy mẫu lát cắt âm tính**: `ZERO_SL_RATIO = {zero_r}` (giữ lại {zero_r * 100:.0f}% lát cắt âm tính có nhu mô phổi)
+- **Tỷ lệ lấy mẫu lát cắt âm tính**: `neg_ratio = {zero_r}` (dynamic_neg={dyn_neg})
 - **Kích thước ảnh**: {img_sz}x{img_sz} (Định dạng 2.5D: 3 lát cắt kế tiếp [z-1, z, z+1])
 """
             spec_file = self.save_dir / "DATA_SPEC_AND_CONFIG.md"
@@ -509,6 +515,8 @@ class BaseTrainer:
             for epoch in range(self.start_epoch, epochs + 1):
                 ep_t0 = time.time()
                 self.on_epoch_start(epoch)
+                if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+                    train_loader.sampler.set_epoch(epoch)
 
                 tr_t0 = time.time()
                 train_m = self.run_epoch(train_loader, is_train=True, epoch=epoch, total_epochs=epochs)
