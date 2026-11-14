@@ -17,10 +17,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from common.data_pipeline.medical_prep import IMAGE_SIZE, lung_cache_path
+from common.data_pipeline.medical_prep import IMAGE_SIZE, lung_cache_path, lung_keep_mask
 from common.engine.checkpoint_io import load_checkpoint_file
-from common.eval3d.metrics3d import compute_3d_metrics
-from common.eval3d.postprocess3d import postprocess_3d_mask
+from common.eval3d.metrics3d import compute_binary_overlap_stats
 from common.eval3d.volume_inference import predict_patient_volume
 from mamba_unet.evaluate import load_mamba_unet_model
 
@@ -63,6 +62,148 @@ def _ensure_slices_df(cache: Path, checkpoint_path: str) -> pd.DataFrame:
     return pd.read_csv(slices_file)
 
 
+def _extract_components_for_threshold(
+    prob: np.ndarray,
+    gt_lab: np.ndarray,
+    gt_b: np.ndarray,
+    keep_lung: Optional[np.ndarray],
+    threshold: float,
+    spacing_z: float,
+    min_span: int,
+) -> list:
+    """Phân tích 26-connectivity và thống kê từng cụm đúng 1 lần cho mỗi ngưỡng xác suất."""
+    mask = (prob >= float(threshold)).astype(np.uint8)
+    if keep_lung is not None:
+        mask &= keep_lung
+
+    if mask.sum() == 0:
+        return []
+
+    for z in np.where(mask.sum(axis=(1, 2)) > 0)[0]:
+        mask[z] = ndi.binary_fill_holes(mask[z]).astype(np.uint8)
+
+    labeled, num_features = ndi.label(mask, structure=S26)
+    if num_features == 0:
+        return []
+
+    objects = ndi.find_objects(labeled)
+    comps = []
+    for comp_id, slc in enumerate(objects, start=1):
+        if slc is None:
+            continue
+        sub_mask = labeled[slc] == comp_id
+        voxel_count = int(sub_mask.sum())
+        if voxel_count == 0:
+            continue
+
+        z_span = int(sub_mask.shape[0])
+        if z_span < min_span:
+            continue
+
+        slice_areas = sub_mask.reshape(z_span, -1).sum(axis=1)
+        max_area = float(slice_areas.max())
+        vol_mm3 = float(voxel_count) * float(spacing_z)
+        tp_voxels = int(gt_b[slc][sub_mask].sum())
+        if tp_voxels > 0:
+            hit_ids = np.unique(gt_lab[slc][sub_mask])
+            hit_gt_ids = frozenset(int(x) for x in hit_ids if x > 0)
+        else:
+            hit_gt_ids = frozenset()
+
+        comps.append(
+            {
+                "voxel_count": voxel_count,
+                "max_area": max_area,
+                "vol_mm3": vol_mm3,
+                "tp_voxels": tp_voxels,
+                "hit_gt_ids": hit_gt_ids,
+            }
+        )
+    return comps
+
+
+def _evaluate_patient_grid_from_prob(
+    pid: str,
+    prob: np.ndarray,
+    gt: np.ndarray,
+    lung: Optional[np.ndarray],
+    spacing_z: float,
+    thresholds: Sequence[float],
+    min_areas: Sequence[float],
+    min_vols: Sequence[float],
+    min_span: int = 1,
+) -> Tuple[list, list]:
+    """Quét lưới (th, min_area, min_vol) cho 1 bệnh nhân, tái sử dụng kết quả ndi.label theo từng th."""
+    pat_rows, nod_rows = [], []
+
+    gt_b = gt > 0
+    gt_sum = float(gt_b.sum())
+    keep_lung = lung_keep_mask(lung, tumor_mask=None) if lung is not None else None
+
+    gt_lab, n_gt = ndi.label(gt, structure=S26)
+    gt_objs = ndi.find_objects(gt_lab)
+    valid_gt = [(idx, sl) for idx, sl in enumerate(gt_objs, start=1) if sl is not None]
+    diams = [eq_diam(gt_lab[sl] == idx) for idx, sl in valid_gt]
+
+    for th in thresholds:
+        comps = _extract_components_for_threshold(
+            prob=prob,
+            gt_lab=gt_lab,
+            gt_b=gt_b,
+            keep_lung=keep_lung,
+            threshold=th,
+            spacing_z=spacing_z,
+            min_span=min_span,
+        )
+        for ma in min_areas:
+            ma_f = float(ma)
+            for mv in min_vols:
+                mv_f = float(mv)
+                kept = [c for c in comps if c["max_area"] >= ma_f and c["vol_mm3"] >= mv_f]
+
+                tp = float(sum(c["tp_voxels"] for c in kept))
+                pred_sum = float(sum(c["voxel_count"] for c in kept))
+                m = compute_binary_overlap_stats(tp, pred_sum, gt_sum)
+                fp_comps = sum(1 for c in kept if c["tp_voxels"] == 0)
+
+                hit_nodules = set()
+                for c in kept:
+                    if c["hit_gt_ids"]:
+                        hit_nodules.update(c["hit_gt_ids"])
+
+                detected = 0
+                for (idx, _), diam in zip(valid_gt, diams):
+                    ok = idx in hit_nodules
+                    detected += int(ok)
+                    nod_rows.append(
+                        dict(
+                            pid=pid,
+                            th=float(th),
+                            min_area=ma_f,
+                            min_vol=mv_f,
+                            diam=float(diam),
+                            detected=int(ok),
+                        )
+                    )
+
+                pat_rows.append(
+                    dict(
+                        pid=pid,
+                        th=float(th),
+                        min_area=ma_f,
+                        min_vol=mv_f,
+                        dice=float(m["dice_3d"]),
+                        precision=float(m["precision_3d"]),
+                        recall=float(m["recall_3d"]),
+                        fp_comps=int(fp_comps),
+                        n_gt=int(n_gt),
+                        n_detected=int(detected),
+                    )
+                )
+
+    return pat_rows, nod_rows
+
+
 def run_eval_sweep_v2(
     model: torch.nn.Module,
     cache_dir: Path,
@@ -88,63 +229,26 @@ def run_eval_sweep_v2(
             batch_size=batch_size,
             image_size=image_size,
             tta=tta,
+            compute_post_and_metrics=False,
         )
         prob, gt, meta = res["prob_1mm"], res["gt_mask_1mm"], res["meta"]
         sz = float(meta.get("orig_spacing_xyz", [1.0, 1.0, 1.0])[2])
         lp = lung_cache_path(cache_dir / pid)
         lung = np.load(lp) if (lp.exists() and meta.get("lung_ok", True) is not False) else None
 
-        gt_lab, n_gt = ndi.label(gt, structure=S26)
-        gt_objs = ndi.find_objects(gt_lab)
-        valid_gt = [(idx, sl) for idx, sl in enumerate(gt_objs, start=1) if sl is not None]
-        diams = [eq_diam(gt_lab[sl] == idx) for idx, sl in valid_gt]
-
-        for th in thresholds:
-            for ma in min_areas:
-                for mv in min_vols:
-                    pred = postprocess_3d_mask(
-                        prob,
-                        lung_mask_zyx=lung,
-                        threshold=th,
-                        min_slice_area_mm2=ma,
-                        min_volume_mm3=mv,
-                        spacing_z=sz,
-                        min_slices_span=min_span,
-                    )
-                    m = compute_3d_metrics(pred, gt, spacing_z=sz, compute_hd95=False)
-                    pr_lab, n_pr = ndi.label(pred, structure=S26)
-                    hit = np.unique(pr_lab[gt > 0])
-                    hit = hit[hit > 0]
-
-                    detected = 0
-                    for (idx, sl), diam in zip(valid_gt, diams):
-                        ok = bool((pred[sl][gt_lab[sl] == idx] > 0).any())
-                        detected += int(ok)
-                        nod_rows.append(
-                            dict(
-                                pid=pid,
-                                th=float(th),
-                                min_area=float(ma),
-                                min_vol=float(mv),
-                                diam=float(diam),
-                                detected=int(ok),
-                            )
-                        )
-
-                    pat_rows.append(
-                        dict(
-                            pid=pid,
-                            th=float(th),
-                            min_area=float(ma),
-                            min_vol=float(mv),
-                            dice=float(m["dice_3d"]),
-                            precision=float(m["precision_3d"]),
-                            recall=float(m["recall_3d"]),
-                            fp_comps=int(n_pr - len(hit)),
-                            n_gt=int(n_gt),
-                            n_detected=int(detected),
-                        )
-                    )
+        p_rows, n_rows = _evaluate_patient_grid_from_prob(
+            pid=pid,
+            prob=prob,
+            gt=gt,
+            lung=lung,
+            spacing_z=sz,
+            thresholds=thresholds,
+            min_areas=min_areas,
+            min_vols=min_vols,
+            min_span=min_span,
+        )
+        pat_rows.extend(p_rows)
+        nod_rows.extend(n_rows)
         if verbose:
             print(f"[{pid}] Đã quét xong.")
 

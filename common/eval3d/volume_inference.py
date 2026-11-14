@@ -53,6 +53,7 @@ def predict_patient_volume(
     min_volume_mm3: float = 0.0,
     tta: bool = False,
     use_amp: bool = True,
+    compute_post_and_metrics: bool = True,
 ) -> Dict[str, Any]:
     """
     Suy luận 3D hoàn chỉnh cho 1 bệnh nhân từ thư mục cache_1mm/<patient_id>:
@@ -118,6 +119,19 @@ def predict_patient_volume(
             prob_padded[z] = probs_np[i]
 
     prob_1mm = unpad_or_uncrop_xy(prob_padded, (h_1mm, w_1mm), pad_value=0.0)
+    gt_1mm = (np.asarray(msk_1mm) > 0).astype(np.uint8)
+
+    if not compute_post_and_metrics:
+        return {
+            "prob_1mm": prob_1mm,
+            "raw_mask_1mm": None,
+            "clean_mask_1mm": None,
+            "gt_mask_1mm": gt_1mm,
+            "meta": meta,
+            "metrics_raw": None,
+            "metrics_post": None,
+        }
+
     raw_mask_1mm = (prob_1mm >= float(threshold)).astype(np.uint8)
     if keep_lung is not None:
         raw_mask_1mm &= keep_lung
@@ -132,7 +146,6 @@ def predict_patient_volume(
         fill_holes=True,
     )
 
-    gt_1mm = (np.asarray(msk_1mm) > 0).astype(np.uint8)
     metrics_raw = compute_3d_metrics(raw_mask_1mm, gt_1mm, spacing_z=spacing_z, compute_hd95=False)
     metrics_post = compute_3d_metrics(clean_mask_1mm, gt_1mm, spacing_z=spacing_z, compute_hd95=True)
 

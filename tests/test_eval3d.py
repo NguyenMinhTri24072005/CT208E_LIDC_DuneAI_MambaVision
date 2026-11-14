@@ -215,8 +215,97 @@ class TestVolumeInference(unittest.TestCase):
             self.assertEqual(len(df), 1)
             self.assertTrue(csv_out.exists())
             self.assertTrue(json_out.exists())
+
+            # Kiểm tra compute_post_and_metrics=False trả về prob_1mm & gt_mask_1mm giống hệt
+            res_fast = predict_patient_volume(
+                model=model,
+                patient_cache_dir=p_dir,
+                batch_size=2,
+                image_size=32,
+                use_amp=False,
+                compute_post_and_metrics=False,
+            )
+            self.assertTrue(np.array_equal(res_fast["prob_1mm"], res["prob_1mm"]))
+            self.assertTrue(np.array_equal(res_fast["gt_mask_1mm"], res["gt_mask_1mm"]))
+            self.assertIsNone(res_fast["clean_mask_1mm"])
+            self.assertIsNone(res_fast["metrics_raw"])
+            self.assertIsNone(res_fast["metrics_post"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_eval_sweep_v2_matches_legacy_reference_bit_exact(self):
+        """Đảm bảo _evaluate_patient_grid_from_prob khớp 100% với vòng lặp postprocess_3d_mask cũ."""
+        from scipy import ndimage as ndi
+        from tools.eval_sweep_v2 import S26, _evaluate_patient_grid_from_prob, eq_diam
+
+        def _legacy_grid(pid, prob, gt, lung, sz, ths, mas, mvs, min_span=1):
+            gt_lab, n_gt = ndi.label(gt, structure=S26)
+            gt_objs = ndi.find_objects(gt_lab)
+            valid_gt = [(idx, sl) for idx, sl in enumerate(gt_objs, start=1) if sl is not None]
+            diams = [eq_diam(gt_lab[sl] == idx) for idx, sl in valid_gt]
+            p_rows, n_rows = [], []
+            for th in ths:
+                for ma in mas:
+                    for mv in mvs:
+                        pred = postprocess_3d_mask(
+                            prob,
+                            lung_mask_zyx=lung,
+                            threshold=th,
+                            min_slice_area_mm2=ma,
+                            min_volume_mm3=mv,
+                            spacing_z=sz,
+                            min_slices_span=min_span,
+                        )
+                        m = compute_3d_metrics(pred, gt, spacing_z=sz, compute_hd95=False)
+                        pr_lab, n_pr = ndi.label(pred, structure=S26)
+                        hit = np.unique(pr_lab[gt > 0])
+                        hit = hit[hit > 0]
+                        det = 0
+                        for (idx, sl), diam in zip(valid_gt, diams):
+                            ok = bool((pred[sl][gt_lab[sl] == idx] > 0).any())
+                            det += int(ok)
+                            n_rows.append(dict(pid=pid, th=float(th), min_area=float(ma), min_vol=float(mv), diam=float(diam), detected=int(ok)))
+                        p_rows.append(dict(
+                            pid=pid, th=float(th), min_area=float(ma), min_vol=float(mv),
+                            dice=float(m["dice_3d"]), precision=float(m["precision_3d"]), recall=float(m["recall_3d"]),
+                            fp_comps=int(n_pr - len(hit)), n_gt=int(n_gt), n_detected=int(det),
+                        ))
+            return p_rows, n_rows
+
+        rng = np.random.default_rng(123)
+        lung = np.zeros((10, 48, 48), dtype=np.uint8)
+        lung[1:9, 6:42, 6:42] = 1
+
+        # Ca 1: đa nốt, có lỗ khuyết trong khối dự đoán, 1 thành phần ngoài phổi, 1 cụm nối 2 nốt GT
+        gt1 = np.zeros((10, 48, 48), dtype=np.uint8)
+        gt1[2:5, 10:15, 10:15] = 1
+        gt1[2:5, 17:21, 10:15] = 1
+        gt1[6:8, 28:31, 28:31] = 1
+        prob1 = rng.uniform(0.0, 0.25, size=(10, 48, 48)).astype(np.float32)
+        prob1[2:5, 10:21, 10:15] = 0.85
+        prob1[3, 12:14, 12:14] = 0.05  # lỗ khuyết giữa vùng dự đoán
+        prob1[6:8, 28:31, 28:31] = 0.55
+        prob1[0, 1:4, 1:4] = 0.95      # ngoài phổi
+        prob1[5, 32:36, 32:36] = 0.65  # FP nhỏ 1 lát
+
+        # Ca 2: không u (gt rỗng), có FP ở ngưỡng 0.5 nhưng sạch ở 0.8
+        gt2 = np.zeros((8, 40, 40), dtype=np.uint8)
+        prob2 = np.zeros((8, 40, 40), dtype=np.float32)
+        prob2[3:5, 15:20, 15:20] = 0.62
+
+        ths = [0.3, 0.5, 0.7, 0.9]
+        mas = [5.0, 6.0, 20.0]
+        mvs = [0.0, 15.0, 40.0]
+
+        for pid, pr, g, lu, sz, ms in [
+            ("PAT_POS_SPAN1", prob1, gt1, lung, 1.5, 1),
+            ("PAT_POS_SPAN2", prob1, gt1, lung, 1.5, 2),
+            ("PAT_NO_TUMOR", prob2, gt2, None, 1.0, 1),
+        ]:
+            p_fast, n_fast = _evaluate_patient_grid_from_prob(pid, pr, g, lu, sz, ths, mas, mvs, min_span=ms)
+            p_ref, n_ref = _legacy_grid(pid, pr, g, lu, sz, ths, mas, mvs, min_span=ms)
+            self.assertEqual(p_fast, p_ref)
+            self.assertEqual(n_fast, n_ref)
 
 
 if __name__ == "__main__":

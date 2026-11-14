@@ -51,29 +51,17 @@ def _compute_hd95_mm(
     return float(np.percentile(all_dists, 95))
 
 
-def compute_3d_metrics(
-    pred_mask: np.ndarray,
-    gt_mask: np.ndarray,
-    spacing_z: float = 1.0,
-    compute_hd95: bool = True,
+def compute_binary_overlap_stats(
+    tp: float,
+    pred_sum: float,
+    gt_sum: float,
     eps: float = 1e-6,
-) -> Dict[str, Union[float, int]]:
-    """
-    Tính bộ chỉ số phân vùng 3D trên toàn bộ thể tích phổi của bệnh nhân:
-      - dice_3d, iou_3d, precision_3d, recall_3d
-      - pred_volume_mm3, gt_volume_mm3
-      - hd95_mm (Hausdorff Distance 95% tính bằng mm)
-    """
-    pred_b = np.asarray(pred_mask) > 0
-    gt_b = np.asarray(gt_mask) > 0
-
-    tp = float(np.logical_and(pred_b, gt_b).sum())
-    fp = float(np.logical_and(pred_b, ~gt_b).sum())
-    fn = float(np.logical_and(~pred_b, gt_b).sum())
-
-    pred_sum = tp + fp
-    gt_sum = tp + fn
-    union = tp + fp + fn
+) -> Dict[str, float]:
+    """Tính dice_3d, iou_3d, precision_3d, recall_3d trực tiếp từ các tổng TP/Pred/GT."""
+    tp = float(tp)
+    pred_sum = float(pred_sum)
+    gt_sum = float(gt_sum)
+    union = pred_sum + gt_sum - tp
 
     if pred_sum == 0 and gt_sum == 0:
         dice = 1.0
@@ -91,6 +79,35 @@ def compute_3d_metrics(
         precision = (tp + eps) / (pred_sum + eps) if pred_sum > 0 else 0.0
         recall = (tp + eps) / (gt_sum + eps) if gt_sum > 0 else 0.0
 
+    return {
+        "dice_3d": float(dice),
+        "iou_3d": float(iou),
+        "precision_3d": float(precision),
+        "recall_3d": float(recall),
+    }
+
+
+def compute_3d_metrics(
+    pred_mask: np.ndarray,
+    gt_mask: np.ndarray,
+    spacing_z: float = 1.0,
+    compute_hd95: bool = True,
+    eps: float = 1e-6,
+) -> Dict[str, Union[float, int]]:
+    """
+    Tính bộ chỉ số phân vùng 3D trên toàn bộ thể tích phổi của bệnh nhân:
+      - dice_3d, iou_3d, precision_3d, recall_3d
+      - pred_volume_mm3, gt_volume_mm3
+      - hd95_mm (Hausdorff Distance 95% tính bằng mm)
+    """
+    pred_b = np.asarray(pred_mask) > 0
+    gt_b = np.asarray(gt_mask) > 0
+
+    tp = float(np.logical_and(pred_b, gt_b).sum())
+    pred_sum = float(pred_b.sum())
+    gt_sum = float(gt_b.sum())
+    overlap = compute_binary_overlap_stats(tp, pred_sum, gt_sum, eps=eps)
+
     hd95 = (
         _compute_hd95_mm(pred_b, gt_b, spacing_zyx=(float(spacing_z), 1.0, 1.0))
         if compute_hd95
@@ -98,10 +115,7 @@ def compute_3d_metrics(
     )
 
     return {
-        "dice_3d": float(dice),
-        "iou_3d": float(iou),
-        "precision_3d": float(precision),
-        "recall_3d": float(recall),
+        **overlap,
         "pred_voxels": int(pred_sum),
         "gt_voxels": int(gt_sum),
         "pred_volume_mm3": round(float(pred_sum * spacing_z), 2),
