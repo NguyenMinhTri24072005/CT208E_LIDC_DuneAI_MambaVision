@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -285,6 +286,69 @@ class TestRun1DataPipeline(unittest.TestCase):
             self.assertFalse(cfg["data"]["dynamic_neg"])
             self.assertFalse(cfg["model"]["hr_skip"])
             self.assertEqual(cfg["optimizer"]["ema"], 0.0)
+
+            # Kiểm tra thêm: history.csv KHÔNG bị sub_losses ghi đè lên train_dice / val_dice
+            df_h = pd.read_csv(runs_root / "test_r0_parity" / "history.csv")
+            for col in ("train_loss_bce", "train_loss_dice", "val_loss_bce", "val_loss_dice"):
+                self.assertIn(col, df_h.columns, f"Thiếu cột {col} trong history.csv")
+            self.assertAlmostEqual(
+                float(df_h.loc[0, "val_dice"]),
+                float(cfg["result"]["best_val_dice"]),
+                places=4,
+                msg="val_dice trong history.csv bị lệch khỏi best_val_dice thật!",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_07_eval3d_requires_index_for_val_and_supports_slices_csv(self):
+        """evaluate_dataset_3d với split='val' phải fail-loud nếu thiếu slices.csv và lọc đúng khi truyền slices_csv."""
+        import torch
+        from common.eval3d.eval_runner import evaluate_dataset_3d
+        from mamba_unet.backbone.mamba_vision import MambaVision
+        from mamba_unet.model import MambaUNet
+
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cache = tmp / "cache"
+            for pid in ("LIDC-IDRI-9001", "LIDC-IDRI-9002"):
+                pdir = cache / pid
+                pdir.mkdir(parents=True)
+                np.save(pdir / "image_1mm.npy", np.full((4, 32, 32), -800, dtype=np.int16))
+                msk = np.zeros((4, 32, 32), dtype=np.uint8)
+                msk[1:3, 10:15, 10:15] = 1
+                np.save(pdir / "mask_1mm.npy", msk)
+                np.save(pdir / "lung_1mm.npy", np.ones((4, 32, 32), dtype=np.uint8))
+                (pdir / "meta.json").write_text(
+                    json.dumps({"orig_shape_zyx": [4, 32, 32], "orig_spacing_xyz": [1.0, 1.0, 1.0], "shape_1mm_zyx": [4, 32, 32]}),
+                    encoding="utf-8",
+                )
+
+            bb = MambaVision(dim=16, in_dim=8, depths=[1, 1, 2, 1], window_size=[8, 8, 14, 7], num_heads=[2, 2, 4, 4], in_chans=3)
+            model = MambaUNet(in_channels=3, num_classes=1, backbone=bb, act="relu")
+
+            # Không có slices.csv và split='val' -> phải báo lỗi FileNotFoundError thay vì lén chạy toàn bộ
+            with self.assertRaises(FileNotFoundError):
+                evaluate_dataset_3d(model=model, cache_dir=cache, split="val", use_amp=False)
+
+            # Truyền --slices-csv tùy chỉnh chỉ chọn LIDC-IDRI-9002 làm val -> chỉ eval đúng 1 ca đó
+            custom_csv = tmp / "slices_r1b.csv"
+            pd.DataFrame([
+                {"patient_id": "LIDC-IDRI-9001", "z": 1, "split": "train"},
+                {"patient_id": "LIDC-IDRI-9002", "z": 1, "split": "val"},
+            ]).to_csv(custom_csv, index=False)
+
+            from common.eval3d.volume_inference import predict_patient_volume as _orig_pred
+
+            def _small_pred(*p_args, **p_kwargs):
+                p_kwargs.setdefault("image_size", 64)
+                return _orig_pred(*p_args, **p_kwargs)
+
+            with patch("common.eval3d.eval_runner.predict_patient_volume", side_effect=_small_pred):
+                df = evaluate_dataset_3d(
+                    model=model, cache_dir=cache, split="val", batch_size=2,
+                    use_amp=False, slices_csv=custom_csv,
+                )
+            self.assertEqual(df["patient_id"].tolist(), ["LIDC-IDRI-9002"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

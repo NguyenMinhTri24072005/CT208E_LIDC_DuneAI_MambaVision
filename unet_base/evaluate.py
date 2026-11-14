@@ -124,6 +124,7 @@ def eval_action(args):
         out_json=args.out_json,
         device=device,
         use_amp=not args.no_amp,
+        slices_csv=getattr(args, "slices_csv", None),
     )
 
 
@@ -205,6 +206,7 @@ def main():
     # 3. eval
     eval_p = subparsers.add_parser("eval", help="Đánh giá 3D trên toàn bộ tập dữ liệu")
     eval_p.add_argument("--cache-dir", default="data/cache_1mm", help="Thư mục dữ liệu cache_1mm")
+    eval_p.add_argument("--slices-csv", default=None, help="Đường dẫn file slices.csv tùy chỉnh")
     eval_p.add_argument("--checkpoint", required=True, help="File trọng số checkpoint (.pth)")
     eval_p.add_argument("--split", choices=["val", "train", "all"], default="val")
     eval_p.add_argument("--features", type=int, default=64)

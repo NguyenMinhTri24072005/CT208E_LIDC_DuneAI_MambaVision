@@ -356,7 +356,7 @@ class BaseTrainer:
                     }
                     if sub_loss_sums:
                         for k, v in sub_loss_sums.items():
-                            p_dict[k] = f"{(v / max(1, total_samples)):.4f}"
+                            p_dict[f"loss_{k}"] = f"{(v / max(1, total_samples)):.4f}"
                     iterator.set_postfix(**p_dict)
 
         eps = 1e-6
@@ -556,11 +556,11 @@ class BaseTrainer:
                     "time_sec": round(elapsed, 2),
                     "eta_sec": round(eta_sec, 2),
                 }
-                # Bổ sung các thành phần sub-losses vào history nếu có
+                # Bổ sung các thành phần sub-losses với tiền tố loss_ để tuyệt đối không ghi đè train_dice/val_dice
                 for k, v in train_m.get("sub_losses", {}).items():
-                    row[f"train_{k}"] = round(v, 5)
+                    row[f"train_loss_{k}"] = round(v, 5)
                 for k, v in val_m.get("sub_losses", {}).items():
-                    row[f"val_{k}"] = round(v, 5)
+                    row[f"val_loss_{k}"] = round(v, 5)
 
                 self.history = [r for r in self.history if int(r.get("epoch", -1)) != epoch] + [row]
                 from common.engine.utils import atomic_save_json

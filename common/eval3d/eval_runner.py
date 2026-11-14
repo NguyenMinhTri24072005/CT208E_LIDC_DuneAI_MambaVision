@@ -38,22 +38,27 @@ def evaluate_dataset_3d(
     out_json: Optional[Union[str, Path]] = None,
     device: Optional[torch.device] = None,
     use_amp: bool = True,
+    slices_csv: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
     """
     Chạy suy luận 3D và hậu xử lý cho toàn bộ bệnh nhân thuộc `split` ('val', 'train', hoặc 'all').
     So sánh trực tiếp Dice 3D trước và sau hậu xử lý.
     """
     cache_dir = Path(cache_dir)
-    csv_path = cache_dir / "slices.csv"
-    if csv_path.exists() and split != "all":
+    csv_path = Path(slices_csv) if slices_csv else (cache_dir / "slices.csv")
+    if slices_csv and not csv_path.exists():
+        raise FileNotFoundError(f"❌ Không tìm thấy file --slices-csv: {csv_path}")
+
+    if split != "all":
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"❌ Không tìm thấy file chỉ mục '{csv_path}' để lọc split='{split}'. "
+                f"Vui lòng truyền --slices-csv <đường_dẫn_csv> hoặc dùng --split all."
+            )
         df_slices = pd.read_csv(csv_path)
-        if "split" in df_slices.columns and "patient_id" in df_slices.columns:
-            pids = sorted(df_slices[df_slices["split"] == split]["patient_id"].unique().tolist())
-        else:
-            pids = sorted([
-                p.name for p in cache_dir.iterdir()
-                if p.is_dir() and (p / "meta.json").exists() and (p / "image_1mm.npy").exists()
-            ])
+        if "split" not in df_slices.columns or "patient_id" not in df_slices.columns:
+            raise ValueError(f"❌ File chỉ mục '{csv_path}' thiếu cột 'split' hoặc 'patient_id'.")
+        pids = sorted(df_slices[df_slices["split"] == split]["patient_id"].unique().tolist())
     else:
         pids = sorted([
             p.name for p in cache_dir.iterdir()
