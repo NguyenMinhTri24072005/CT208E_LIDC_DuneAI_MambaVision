@@ -14,6 +14,7 @@ common/engine/base_trainer.py - Vòng lặp huấn luyện chuẩn BaseTrainer d
       * build_param_groups(lr): phân nhóm learning rate cho backbone/decoder
 """
 
+import copy
 import datetime
 import os
 import shutil
@@ -69,6 +70,40 @@ def _autocast_context(enabled: bool):
     return nullcontext()
 
 
+class ModelEMA:
+    """
+    Exponential Moving Average (EMA) cho trọng số mô hình (plain class, không kế thừa nn.Module).
+    Sử dụng EMA warmup: d = min(decay, (1 + num_updates) / (10 + num_updates)).
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.num_updates = 0
+        self.ema_model = copy.deepcopy(model).eval()
+        for p in self.ema_model.parameters():
+            p.requires_grad_(False)
+
+    def update(self, model: nn.Module) -> None:
+        """Cập nhật trọng số EMA sau mỗi bước optimizer.step()."""
+        self.num_updates += 1
+        d = min(self.decay, (1.0 + self.num_updates) / (10.0 + self.num_updates))
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, ema_v in self.ema_model.state_dict().items():
+                src_v = msd[k]
+                if ema_v.is_floating_point():
+                    ema_v.mul_(d).add_(src_v.detach().to(device=ema_v.device, dtype=ema_v.dtype), alpha=1.0 - d)
+                else:
+                    ema_v.copy_(src_v.to(device=ema_v.device))
+
+    def state_dict(self) -> Dict[str, Any]:
+        return self.ema_model.state_dict()
+
+    def load_state_dict(self, state_dict: Dict[str, Any], num_updates: int = 0) -> None:
+        self.ema_model.load_state_dict(state_dict)
+        self.num_updates = int(num_updates)
+
+
 class BaseTrainer:
     """Lớp quản lý huấn luyện lõi cho các kiến trúc mạng."""
 
@@ -87,6 +122,7 @@ class BaseTrainer:
         show_progress: bool = True,
         drive_sync_dir: Optional[Union[str, Path]] = None,
         cache_dir: Optional[Union[str, Path]] = None,
+        ema_decay: float = 0.0,
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.is_cuda = self.device.type == "cuda"
@@ -116,6 +152,8 @@ class BaseTrainer:
 
         self.grad_clip = float(grad_clip) if grad_clip is not None else 0.0
         self.show_progress = bool(show_progress)
+        self.ema_decay = float(ema_decay) if ema_decay is not None else 0.0
+        self.ema = ModelEMA(self._unwrap_model(), decay=self.ema_decay) if self.ema_decay > 0.0 else None
 
         self.start_epoch = 1
         self.best_val_dice = -1.0
@@ -178,10 +216,20 @@ class BaseTrainer:
                 win_w, win_l, resamp, tumor_lim, zero_r, val_sp, img_sz = 1500, -600, 25, 20.0, 0.25, 0.15, 512
 
             data_cfg = (self.run_handle.config.get("data", {}) if self.run_handle else {}) or {}
+            opt_cfg = (self.run_handle.config.get("optimizer", {}) if self.run_handle else {}) or {}
+            loss_cfg = (self.run_handle.config.get("loss", {}) if self.run_handle else {}) or {}
             tumor_lim = data_cfg.get("min_train_area", tumor_lim)
             zero_r = data_cfg.get("neg_ratio", zero_r)
             img_sz = data_cfg.get("image_size", img_sz)
             dyn_neg = data_cfg.get("dynamic_neg", False)
+            aug_lvl = data_cfg.get("aug_level", 1)
+            wd_val = opt_cfg.get("weight_decay", 1e-4)
+            ema_val = opt_cfg.get("ema", self.ema_decay)
+            lr_val = opt_cfg.get("lr", "N/A")
+            frz_ep = opt_cfg.get("freeze_backbone_epochs", "N/A")
+            bb_mult = opt_cfg.get("backbone_lr_mult", "N/A")
+            loss_name = loss_cfg.get("name", "N/A")
+            loss_params = loss_cfg.get("params", {})
 
             data_spec_md = f"""# 📊 HỒ SƠ DỮ LIỆU & CẤU HÌNH HUẤN LUYỆN
 ## Phiên chạy: `{self.save_dir.name}`
@@ -196,6 +244,11 @@ class BaseTrainer:
   - Lượng tử hóa bước nhảy: `RESAMPLING_STEP = {resamp} HU` (làm tròn {resamp} HU mỗi bước để giảm nhiễu hạt máy quét CT và nén dữ liệu cache)
 - **Tỷ lệ lấy mẫu lát cắt âm tính**: `neg_ratio = {zero_r}` (dynamic_neg={dyn_neg})
 - **Kích thước ảnh**: {img_sz}x{img_sz} (Định dạng 2.5D: 3 lát cắt kế tiếp [z-1, z, z+1])
+
+### 2. Cấu Hình Regularization, Augmentation & Hàm Mất Mát
+- **Augmentation Level**: `aug_level = {aug_lvl}` | **EMA Decay**: `{ema_val}` | **Weight Decay**: `{wd_val}`
+- **Hàm mất mát (Loss)**: `{loss_name}` (`{loss_params}`)
+- **Chiến lược Tối ưu & Backbone**: `lr = {lr_val}`, `freeze_backbone_epochs = {frz_ep}`, `backbone_lr_mult = {bb_mult}`
 """
             spec_file = self.save_dir / "DATA_SPEC_AND_CONFIG.md"
             with open(spec_file, "w", encoding="utf-8") as f:
@@ -300,6 +353,9 @@ class BaseTrainer:
         iterator = tqdm(loader, desc=ep_prefix, leave=False, dynamic_ncols=True) if use_bar else loader
 
         grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
+        eval_model = self.ema.ema_model if (not is_train and self.ema is not None) else self.model
+        if not is_train and self.ema is not None:
+            eval_model.eval()
         with grad_ctx:
             for batch in iterator:
                 images, masks = self._prepare_batch(batch)
@@ -309,7 +365,7 @@ class BaseTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 with _autocast_context(self.use_amp):
-                    logits = self.model(images)
+                    logits = self.model(images) if is_train else eval_model(images)
                     loss = self.criterion(logits, masks)
 
                 if is_train and self.optimizer:
@@ -325,6 +381,8 @@ class BaseTrainer:
                         if self.grad_clip > 0:
                             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                         self.optimizer.step()
+                    if self.ema is not None:
+                        self.ema.update(self._unwrap_model())
 
                 total_loss += float(loss.item()) * bs
                 total_samples += bs
@@ -379,18 +437,24 @@ class BaseTrainer:
         """Lưu checkpoint và xuất fp16 nếu là best_model."""
         target_path = self.save_dir / filename
         meta = self.checkpoint_meta()
-        extra = {
+        use_ema_for_best = (filename == "best_model.pth" and self.ema is not None)
+        state_to_save = self.ema.state_dict() if use_ema_for_best else self._unwrap_model().state_dict()
+        extra: Dict[str, Any] = {
             "no_improve": self.no_improve,
             "val_metrics": val_metrics,
             "history": self.history,
+            "is_ema": bool(use_ema_for_best),
         }
+        if self.ema is not None and filename != "best_model.pth":
+            extra["ema_state_dict"] = self.ema.state_dict()
+            extra["ema_updates"] = int(self.ema.num_updates)
         opt_sd = self.optimizer.state_dict() if self.optimizer else None
         sch_sd = self.scheduler.state_dict() if self.scheduler else None
         scl_sd = self.scaler.state_dict() if (self.scaler and self.use_amp) else None
 
         save_checkpoint(
             path=target_path,
-            state_dict=self._unwrap_model().state_dict(),
+            state_dict=state_to_save,
             optimizer_state=opt_sd,
             scheduler_state=sch_sd,
             scaler_state=scl_sd,
@@ -438,8 +502,23 @@ class BaseTrainer:
         self._unwrap_model().load_state_dict(sd)
 
         if not resume_training:
+            if self.ema is not None:
+                self.ema.load_state_dict(self._unwrap_model().state_dict(), num_updates=0)
             print(f"📥 Đã nạp trọng số khởi tạo (init-weights) từ: {p.name}")
             return 1
+
+        if self.ema is not None:
+            if "ema_state_dict" in ckpt and ckpt["ema_state_dict"]:
+                try:
+                    self.ema.load_state_dict(
+                        ckpt["ema_state_dict"],
+                        num_updates=int(ckpt.get("ema_updates", 0)),
+                    )
+                except Exception as e:
+                    print(f"⚠️ Không nạp được EMA state ({e}). Khởi tạo lại EMA từ trọng số checkpoint.")
+                    self.ema.load_state_dict(self._unwrap_model().state_dict(), num_updates=0)
+            else:
+                self.ema.load_state_dict(self._unwrap_model().state_dict(), num_updates=0)
 
         if self.optimizer and "optimizer_state_dict" in ckpt and ckpt["optimizer_state_dict"]:
             try:

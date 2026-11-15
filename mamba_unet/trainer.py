@@ -8,9 +8,11 @@ Quy tắc bất biến (spec mục 5.3):
       * freeze_backbone_epochs = N > 0: đóng băng trong N epoch đầu (epoch <= N).
       * freeze_backbone_epochs = -1: đóng băng suốt quá trình.
   - Khi đóng băng, BatchNorm của backbone giữ eval() để không lệch running mean/var.
-  - Phân chia 2 nhóm tham số Optimizer:
-      * Nhóm 'decoder' : lr = base_lr
-      * Nhóm 'backbone': lr = base_lr * backbone_lr_mult (mặc định 0.1 khi pretrained, 1.0 khi scratch).
+  - Phân chia 4 nhóm tham số Optimizer:
+      * Nhóm 'decoder_decay'     : lr = base_lr, weight_decay = wd
+      * Nhóm 'decoder_no_decay'  : lr = base_lr, weight_decay = 0.0 (bias, norm, 1D)
+      * Nhóm 'backbone_decay'    : lr = base_lr * backbone_lr_mult, weight_decay = wd
+      * Nhóm 'backbone_no_decay' : lr = base_lr * backbone_lr_mult, weight_decay = 0.0 (bias, norm, 1D, A_log)
 """
 
 import os
@@ -42,6 +44,7 @@ class MambaUNetTrainer(BaseTrainer):
         num_classes: int = 1,
         freeze_backbone_epochs: int = 0,
         backbone_lr_mult: float = 0.1,
+        weight_decay: float = 1e-4,
         **kwargs,
     ):
         self.backbone_name = backbone_name
@@ -50,6 +53,7 @@ class MambaUNetTrainer(BaseTrainer):
         self.num_classes = num_classes
         self.freeze_backbone_epochs = int(freeze_backbone_epochs)
         self.backbone_lr_mult = float(backbone_lr_mult)
+        self.weight_decay = float(weight_decay)
         super().__init__(model=model, criterion=criterion, **kwargs)
 
     def on_epoch_start(self, epoch: int):
@@ -70,22 +74,44 @@ class MambaUNetTrainer(BaseTrainer):
             for param in unwrapped.encoder.parameters():
                 param.requires_grad = True
 
-    def build_param_groups(self, lr: float) -> List[Dict[str, Any]]:
-        """Phân chia 2 nhóm learning rate: decoder và backbone."""
+    def build_param_groups(self, lr: float, weight_decay: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Phân chia 4 nhóm tham số Optimizer: (decoder/backbone) x (decay/no_decay)."""
         unwrapped = self._unwrap_model()
+        wd = self.weight_decay if weight_decay is None else float(weight_decay)
 
-        decoder_params = [p for p in unwrapped.decoder.parameters() if p.requires_grad]
-        backbone_params = [p for p in unwrapped.encoder.parameters() if p.requires_grad]
+        def _is_no_decay(name: str, param: nn.Parameter) -> bool:
+            return (
+                param.ndim < 2
+                or name.endswith(".bias")
+                or name == "bias"
+                or name.endswith("A_log")
+                or bool(getattr(param, "_no_weight_decay", False))
+            )
 
-        groups = [
-            {"params": decoder_params, "lr": lr, "name": "decoder"},
-        ]
-        if backbone_params:
-            groups.append({
-                "params": backbone_params,
-                "lr": lr * self.backbone_lr_mult,
-                "name": "backbone",
-            })
+        def _split_decay(module: nn.Module, include_frozen: bool = False):
+            decay_params, no_decay_params = [], []
+            for name, p in module.named_parameters():
+                if not include_frozen and not p.requires_grad:
+                    continue
+                if _is_no_decay(name, p):
+                    no_decay_params.append(p)
+                else:
+                    decay_params.append(p)
+            return decay_params, no_decay_params
+
+        dec_decay, dec_no_decay = _split_decay(unwrapped.decoder, include_frozen=False)
+        keep_frozen = (self.freeze_backbone_epochs == -1)
+        bb_decay, bb_no_decay = _split_decay(unwrapped.encoder, include_frozen=(not keep_frozen))
+
+        groups: List[Dict[str, Any]] = []
+        if dec_decay:
+            groups.append({"params": dec_decay, "lr": lr, "weight_decay": wd, "name": "decoder_decay"})
+        if dec_no_decay:
+            groups.append({"params": dec_no_decay, "lr": lr, "weight_decay": 0.0, "name": "decoder_no_decay"})
+        if bb_decay:
+            groups.append({"params": bb_decay, "lr": lr * self.backbone_lr_mult, "weight_decay": wd, "name": "backbone_decay"})
+        if bb_no_decay:
+            groups.append({"params": bb_no_decay, "lr": lr * self.backbone_lr_mult, "weight_decay": 0.0, "name": "backbone_no_decay"})
         return groups
 
     def checkpoint_meta(self) -> Dict[str, Any]:
@@ -160,12 +186,20 @@ def _selftest():
         assert p.requires_grad, "Backbone phải được mở băng ở Epoch 3!"
     print("  ✓ Epoch 3: Backbone mở băng chính xác.")
 
-    # 4. Kiểm tra nhóm tham số Optimizer
+    # 4. Kiểm tra phân nhóm Optimizer 4-nhóm (decoder/backbone x decay/no_decay)
+    trainer.weight_decay = 0.02
     groups = trainer.build_param_groups(1e-4)
-    assert len(groups) == 2, f"Phải có đúng 2 nhóm tham số, nhận được {len(groups)}"
-    assert groups[0]["name"] == "decoder" and groups[0]["lr"] == 1e-4
-    assert groups[1]["name"] == "backbone" and abs(groups[1]["lr"] - 1e-5) < 1e-9
-    print("  ✓ Phân nhóm Learning Rate chính xác (decoder: 1e-4, backbone: 1e-5).")
+    assert len(groups) == 4, f"Phải có đúng 4 nhóm tham số, nhận được {len(groups)}"
+    by_name = {g["name"]: g for g in groups}
+    assert set(by_name.keys()) == {"decoder_decay", "decoder_no_decay", "backbone_decay", "backbone_no_decay"}
+    assert by_name["decoder_decay"]["lr"] == 1e-4 and abs(by_name["decoder_decay"]["weight_decay"] - 0.02) < 1e-12
+    assert by_name["decoder_no_decay"]["lr"] == 1e-4 and by_name["decoder_no_decay"]["weight_decay"] == 0.0
+    assert abs(by_name["backbone_decay"]["lr"] - 1e-5) < 1e-9 and abs(by_name["backbone_decay"]["weight_decay"] - 0.02) < 1e-12
+    assert abs(by_name["backbone_no_decay"]["lr"] - 1e-5) < 1e-9 and by_name["backbone_no_decay"]["weight_decay"] == 0.0
+    grouped_ids = {id(p) for g in groups for p in g["params"]}
+    all_ids = {id(p) for p in model.parameters()}
+    assert grouped_ids == all_ids, "Tổng hợp 4 nhóm tham số phải phủ trọn vẹn 100% tham số mô hình!"
+    print("  ✓ Phân nhóm 4-group Optimizer chính xác (decoder/backbone x decay=0.02/no_decay=0.0).")
 
     print("✅ Selftest mamba_unet.trainer hoàn tất thành công!")
 

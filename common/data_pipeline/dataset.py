@@ -22,6 +22,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 import tempfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
@@ -95,6 +96,7 @@ class LIDC25DDataset(Dataset):
         augment=False,
         tumor_union_p=1.0,
         static_neg_only=True,
+        aug_level=1,
     ):
         """
         Args:
@@ -122,6 +124,7 @@ class LIDC25DDataset(Dataset):
         self.augment = bool(augment and (split == "train"))
         self.tumor_union_p = float(tumor_union_p)
         self.static_neg_only = bool(static_neg_only)
+        self.aug_level = int(aug_level)
 
         if not self.csv_path.exists():
             raise FileNotFoundError(
@@ -146,7 +149,7 @@ class LIDC25DDataset(Dataset):
 
     @staticmethod
     def _augment_pair(img_chw, mask_1hw):
-        """Biến đổi hình học đồng bộ trên cả khối kênh 2.5D và mask trung tâm."""
+        """Biến đổi hình học đồng bộ mức 1 (Flip H/V + Rot90) trên khối kênh 2.5D và mask trung tâm."""
         if random.random() < 0.5:
             img_chw = np.flip(img_chw, axis=2)
             mask_1hw = np.flip(mask_1hw, axis=2)
@@ -157,6 +160,75 @@ class LIDC25DDataset(Dataset):
         if k > 0:
             img_chw = np.rot90(img_chw, k=k, axes=(1, 2))
             mask_1hw = np.rot90(mask_1hw, k=k, axes=(1, 2))
+        return np.ascontiguousarray(img_chw), np.ascontiguousarray(mask_1hw)
+
+    @classmethod
+    def _augment_pair_level2(cls, img_chw, mask_1hw):
+        """
+        Tăng cường dữ liệu mức 2 (Run 2c):
+          1. Flip/Rot90 chuẩn (mức 1).
+          2. Biến đổi Affine nhẹ (xoay ±10°, co giãn 0.90-1.10, tịnh tiến ±24 px) với p=0.7
+             kèm cơ chế rollback nếu làm mất hoặc bóp méo quá mức nốt u nhỏ.
+          3. Biến thiên cường độ nhẹ (contrast 0.90-1.10, brightness ±0.05) trên vùng nhu mô phổi với p=0.5.
+        """
+        img_chw, mask_1hw = cls._augment_pair(img_chw, mask_1hw)
+        c, h, w = img_chw.shape
+
+        # 2. Affine nhẹ có kiểm soát bảo vệ nốt u nhỏ
+        if random.random() < 0.7:
+            angle = random.uniform(-10.0, 10.0)
+            scale = random.uniform(0.90, 1.10)
+            tx = random.uniform(-24.0, 24.0)
+            ty = random.uniform(-24.0, 24.0)
+            mat = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, scale)
+            mat[0, 2] += tx
+            mat[1, 2] += ty
+
+            is_int16 = (img_chw.dtype == np.int16)
+            border_val = float(HU_FLOOR) if is_int16 else 0.0
+            warped_img = np.empty_like(img_chw)
+            for ch_idx in range(c):
+                warped_ch = cv2.warpAffine(
+                    img_chw[ch_idx],
+                    mat,
+                    (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=border_val,
+                )
+                warped_img[ch_idx] = warped_ch
+
+            warped_msk_2d = cv2.warpAffine(
+                mask_1hw[0],
+                mat,
+                (w, h),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0.0,
+            )
+            warped_msk = (warped_msk_2d > 0.5).astype(mask_1hw.dtype)[None, ...]
+
+            orig_sum = float(mask_1hw.sum())
+            new_sum = float(warped_msk.sum())
+            min_keep = max(1.0, min(orig_sum * 0.5, 4.0)) if orig_sum > 0.0 else 0.0
+            if orig_sum == 0.0 or new_sum >= min_keep:
+                img_chw = warped_img
+                mask_1hw = warped_msk
+
+        # 3. Biến thiên cường độ nhẹ (bảo toàn nền ngoài phổi)
+        if random.random() < 0.5:
+            contrast = random.uniform(0.90, 1.10)
+            brightness = random.uniform(-0.05, 0.05)
+            if np.issubdtype(img_chw.dtype, np.floating):
+                fg = img_chw > 0.0
+                jittered = np.clip(img_chw * contrast + brightness, 0.0, 1.0)
+                img_chw = np.where(fg, jittered, 0.0).astype(img_chw.dtype)
+            elif img_chw.dtype == np.int16:
+                fg = img_chw > HU_FLOOR
+                wl, ww = -600.0, 1500.0
+                jittered = np.clip((img_chw.astype(np.float32) - wl) * contrast + wl + brightness * ww, float(HU_FLOOR), 150.0)
+                img_chw = np.where(fg, np.rint(jittered), HU_FLOOR).astype(np.int16)
+
         return np.ascontiguousarray(img_chw), np.ascontiguousarray(mask_1hw)
 
     def __getitem__(self, idx):
@@ -199,7 +271,10 @@ class LIDC25DDataset(Dataset):
             img_out = img_stack.astype(np.int16)
 
         if self.augment:
-            img_out, center_mask = self._augment_pair(img_out, center_mask)
+            if self.aug_level >= 2:
+                img_out, center_mask = self._augment_pair_level2(img_out, center_mask)
+            else:
+                img_out, center_mask = self._augment_pair(img_out, center_mask)
 
         return {
             "image": torch.from_numpy(img_out),
@@ -264,6 +339,7 @@ def build_dataloaders(
     keep_all_train_neg=False,
     tumor_union_p=1.0,
     slices_csv=None,
+    aug_level=1,
     **kwargs,
 ):
     cache_path = Path(cache_dir).resolve()
@@ -288,6 +364,7 @@ def build_dataloaders(
         augment=augment,
         tumor_union_p=tumor_union_p,
         static_neg_only=not dynamic_neg_sampling,
+        aug_level=aug_level,
     )
     val_ds = LIDC25DDataset(
         cache_dir=cache_path,
@@ -356,6 +433,7 @@ def build_dataloaders_from_args(args, cache_dir=None):
         keep_all_train_neg=bool(getattr(args, "keep_all_train_neg", False)),
         tumor_union_p=float(getattr(args, "tumor_union_p", 1.0)),
         slices_csv=getattr(args, "slices_csv", None),
+        aug_level=int(getattr(args, "aug_level", 1)),
     )
 
 def _cmd_selftest(_):

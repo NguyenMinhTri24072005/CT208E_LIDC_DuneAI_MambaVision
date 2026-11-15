@@ -157,6 +157,7 @@ def main():
         ("23. Test eval3d", [py, "tests/test_eval3d.py"]),
         ("24. Test notebooks", [py, "tests/test_notebooks.py"]),
         ("25. Check notebooks nbformat", [py, "scripts/make_notebooks.py", "--check"]),
+        ("26. Test Run 2 regularization", [py, "tests/test_run2_regularization.py"]),
     ]
 
     results = []
@@ -202,7 +203,7 @@ def main():
     print(f" [{status_str}] ({elapsed:.2f}s)")
     results.append({
         "num": idx,
-        "name": "26. Cleanliness & Static Audit",
+        "name": f"{idx:02d}. Cleanliness & Static Audit",
         "cmd": "internal AST & structure audit",
         "status": status_str,
         "duration": elapsed,

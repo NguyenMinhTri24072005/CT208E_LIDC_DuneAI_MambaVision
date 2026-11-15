@@ -115,13 +115,15 @@ def add_common_args(
 
 
 def validate_experiment_flags(args: argparse.Namespace) -> None:
-    """Chặn sớm các cờ thuộc Run 2/Run 3 nếu được bật trước khi triển khai."""
-    if float(getattr(args, "ema", 0.0)) > 0.0:
-        raise NotImplementedError("Cờ --ema > 0 thuộc Giai đoạn Run 2 và chưa được kích hoạt ở Run 1.")
-    if int(getattr(args, "aug_level", 1)) != 1:
-        raise NotImplementedError("Cờ --aug-level != 1 thuộc Giai đoạn Run 2 và chưa được kích hoạt ở Run 1.")
+    """Kiểm tra tính hợp lệ của các cờ thực nghiệm."""
+    ema_val = float(getattr(args, "ema", 0.0))
+    if not (0.0 <= ema_val < 1.0):
+        raise ValueError(f"Cờ --ema phải nằm trong khoảng [0.0, 1.0), nhận được: {ema_val}")
+    aug_lvl = int(getattr(args, "aug_level", 1))
+    if aug_lvl not in (1, 2):
+        raise ValueError(f"Cờ --aug-level chỉ hỗ trợ 1 hoặc 2, nhận được: {aug_lvl}")
     if bool(getattr(args, "hr_skip", False)):
-        raise NotImplementedError("Cờ --hr-skip thuộc Giai đoạn Run 3 và chưa được kích hoạt ở Run 1.")
+        raise NotImplementedError("Cờ --hr-skip thuộc Giai đoạn Run 3 và chưa được kích hoạt ở Run 2.")
 
 
 def build_run_data_meta(args: argparse.Namespace, cache_dir: Path, image_size: int) -> Dict[str, Any]:

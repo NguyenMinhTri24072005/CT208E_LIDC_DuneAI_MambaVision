@@ -158,6 +158,8 @@ def train_action(args):
         activation_name=args.activation,
         freeze_backbone_epochs=args.freeze_backbone_epochs,
         backbone_lr_mult=args.backbone_lr_mult,
+        weight_decay=args.weight_decay,
+        ema_decay=float(getattr(args, "ema", 0.0)),
         run_handle=run_handle,
         grad_clip=args.grad_clip,
         use_amp=not args.no_amp,
@@ -167,7 +169,7 @@ def train_action(args):
     )
 
     # 6. Tối ưu hóa (Optimizer & Scheduler với phân nhóm param groups)
-    param_groups = trainer.build_param_groups(args.lr)
+    param_groups = trainer.build_param_groups(args.lr, weight_decay=args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
     trainer.optimizer = optimizer
 
