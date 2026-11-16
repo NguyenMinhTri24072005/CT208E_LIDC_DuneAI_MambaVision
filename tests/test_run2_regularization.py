@@ -308,13 +308,15 @@ class TestRun2Regularization(unittest.TestCase):
         train_src = "\n".join("".join(c.get("source", [])) for c in train_data["cells"])
         self.assertIn("--ema {EMA}", train_src)
         self.assertIn("--aug-level {AUG_LEVEL}", train_src)
-        self.assertIn("mamba_colab_500item_50epoch_R2a_WD002_EMA0999", train_src)
+        self.assertIn("mamba_colab_500item_50epoch_R2", train_src)
+        self.assertIn("WEIGHT_DECAY = 0.02", train_src)
+        self.assertIn("EMA = 0.999", train_src)
 
         with open(step0_nb, "r", encoding="utf-8") as f:
             step0_data = json.load(f)
         self.assertEqual(step0_data.get("nbformat"), 4)
         step0_src = "\n".join("".join(c.get("source", [])) for c in step0_data["cells"])
-        for preset in ('"r2a"', '"r2b"', '"r2c"'):
+        for preset in ('"r2a"', '"r2b"', '"r2c"', '"r2bc"'):
             self.assertIn(preset, step0_src)
 
 
