@@ -366,6 +366,8 @@ class TestPredictRealSamples(unittest.TestCase):
             "SAMPLE_SOURCE =",
             "PATIENT_IDS =",
             "--auto-subdir",
+            "/content/predict_outputs",
+            ".pred_rc",
             "latest_predict_dir.txt",
             "display(Image(",
         ):
