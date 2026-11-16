@@ -1842,6 +1842,42 @@ def cmd_prepare(args) -> None:
     print(f"\n🎯 ĐÃ SẴN SÀNG! Manifest lưu tại: {manifest_path}")
 
 
+def build_predict_out_subdir(
+    patient_ids: Sequence[str],
+    criteria: FilterCriteria,
+    timestamp: Optional[str] = None,
+) -> str:
+    """Tạo tên thư mục con duy nhất có gắn mã bệnh nhân và ngưỡng để không bị ghi đè."""
+    ts = timestamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    pids = list(patient_ids)
+    if len(pids) == 1:
+        ptag = pids[0]
+    elif len(pids) <= 3:
+        short_rest = [p.replace("LIDC-IDRI-", "") for p in pids[1:]]
+        ptag = f"{pids[0]}_{'_'.join(short_rest)}"
+    else:
+        first_s = pids[0]
+        last_s = pids[-1].replace("LIDC-IDRI-", "")
+        ptag = f"{len(pids)}ca_{first_s}_to_{last_s}"
+    return f"{ptag}_th{criteria.threshold:g}_d{criteria.min_diameter_mm:g}_{ts}"
+
+
+def _resolve_unique_out_dirs(
+    base_out: Path,
+    subdir_name: str,
+    base_drive: Optional[Union[str, Path]] = None,
+) -> Tuple[Path, Optional[str]]:
+    """Đảm bảo tên thư mục con chưa tồn tại trên cả local lẫn Drive (tránh ghi đè tuyệt đối)."""
+    cand = subdir_name
+    suffix = 2
+    while (base_out / cand).exists() or (base_drive and (Path(base_drive) / cand).exists()):
+        cand = f"{subdir_name}_{suffix}"
+        suffix += 1
+    out_dir = base_out / cand
+    drive_dir = str(Path(base_drive) / cand) if base_drive else None
+    return out_dir, drive_dir
+
+
 def cmd_predict(args) -> None:
     """Lệnh CLI predict: chạy suy luận theo ngưỡng và xuất báo cáo + hình ảnh so sánh."""
     manifest: Dict[str, Any] = {}
@@ -1918,7 +1954,15 @@ def cmd_predict(args) -> None:
         fill_holes=not args.no_fill_holes,
     )
 
-    out_dir = Path(args.out_dir) if args.out_dir else (_ROOT / "eval_results" / "predict_samples" / meta_info["run_id"])
+    base_out = Path(args.out_dir) if args.out_dir else (_ROOT / "eval_results" / "predict_samples" / meta_info["run_id"])
+    use_auto_subdir = bool(getattr(args, "auto_subdir", False)) or (args.out_dir is None)
+    if use_auto_subdir:
+        subdir_name = build_predict_out_subdir(filtered_ids, criteria)
+        out_dir, drive_out_dir = _resolve_unique_out_dirs(base_out, subdir_name, args.drive_out_dir)
+    else:
+        out_dir = base_out
+        drive_out_dir = args.drive_out_dir
+
     run_predict_pipeline(
         model=model,
         cache_dir=cache_dir,
@@ -1935,8 +1979,12 @@ def cmd_predict(args) -> None:
         render_figures=not args.no_figures,
         slices_per_page=args.slices_per_page,
         max_vis_slices=args.max_vis_slices,
-        drive_out_dir=args.drive_out_dir,
+        drive_out_dir=drive_out_dir,
     )
+
+    base_out.mkdir(parents=True, exist_ok=True)
+    (base_out / "latest_predict_dir.txt").write_text(str(out_dir), encoding="utf-8")
+    print(f"OUT_DIR={out_dir}")
 
 
 def _selftest() -> None:
@@ -2076,7 +2124,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p_pred.add_argument("--no-figures", action="store_true")
     p_pred.add_argument("--slices-per-page", type=int, default=6)
     p_pred.add_argument("--max-vis-slices", type=int, default=0, help="0 = vẽ toàn bộ lát cắt được predict/GT.")
-    p_pred.add_argument("--out-dir", default=None, help="Thư mục lưu CSV, Markdown và hình ảnh PNG.")
+    p_pred.add_argument("--out-dir", default=None, help="Thư mục gốc/đích lưu CSV, Markdown và hình ảnh PNG.")
+    p_pred.add_argument("--auto-subdir", action="store_true", help="Tự động tạo thư mục con theo mã bệnh nhân + ngưỡng + timestamp để tránh ghi đè.")
     p_pred.add_argument("--drive-out-dir", default=None, help="Thư mục Google Drive để đồng bộ toàn bộ kết quả sau khi xong.")
     p_pred.set_defaults(func=cmd_predict)
 

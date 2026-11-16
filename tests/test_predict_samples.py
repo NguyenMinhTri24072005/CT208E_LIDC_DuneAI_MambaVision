@@ -29,6 +29,7 @@ if str(_ROOT) not in sys.path:
 
 from tools.predict_real_samples import (
     FilterCriteria,
+    build_predict_out_subdir,
     compute_slice_and_patient_stats,
     discover_run_splits,
     filter_and_analyze_components,
@@ -280,20 +281,52 @@ class TestPredictRealSamples(unittest.TestCase):
             cmd_pred = [
                 sys.executable, str(_ROOT / "tools" / "predict_real_samples.py"), "predict",
                 "--manifest", str(manifest_p),
+                "--patient-ids", "LIDC-IDRI-0002",
                 "--no-cuda", "--no-amp", "--no-progress",
                 "--batch-size", "2",
                 "--threshold", "0.5",
                 "--min-diameter-mm", "5.0",
                 "--out-dir", str(out_dir),
+                "--auto-subdir",
                 "--drive-out-dir", str(drive_out),
             ]
             r2 = subprocess.run(cmd_pred, capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(r2.returncode, 0, msg=f"predict failed:\n{r2.stdout}\n{r2.stderr}")
 
+            # Chạy tiếp ca khác vào cùng base out_dir với --auto-subdir -> KHÔNG được ghi đè!
+            cmd_pred_3 = [
+                sys.executable, str(_ROOT / "tools" / "predict_real_samples.py"), "predict",
+                "--manifest", str(manifest_p),
+                "--patient-ids", "LIDC-IDRI-0003",
+                "--no-cuda", "--no-amp", "--no-progress",
+                "--batch-size", "2",
+                "--threshold", "0.5",
+                "--min-diameter-mm", "5.0",
+                "--out-dir", str(out_dir),
+                "--auto-subdir",
+                "--drive-out-dir", str(drive_out),
+            ]
+            r3 = subprocess.run(cmd_pred_3, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            self.assertEqual(r3.returncode, 0, msg=f"predict 2nd run failed:\n{r3.stdout}\n{r3.stderr}")
+
+            local_subdirs = sorted(d for d in out_dir.iterdir() if d.is_dir())
+            drive_subdirs = sorted(d for d in drive_out.iterdir() if d.is_dir())
+            self.assertEqual(len(local_subdirs), 2, f"Phải có 2 folder riêng biệt, thấy: {local_subdirs}")
+            self.assertEqual(len(drive_subdirs), 2, f"Drive phải có 2 folder riêng biệt, thấy: {drive_subdirs}")
+            self.assertTrue(any(d.name.startswith("LIDC-IDRI-0002_") for d in local_subdirs))
+            self.assertTrue(any(d.name.startswith("LIDC-IDRI-0003_") for d in local_subdirs))
+            self.assertTrue((out_dir / "latest_predict_dir.txt").is_file())
+
+            sub_0002 = next(d for d in local_subdirs if d.name.startswith("LIDC-IDRI-0002_"))
             for fname in ("predict_patients_summary.csv", "predict_nodules_detail.csv", "predict_slices_detail.csv", "predict_report.json", "PREDICT_REPORT.md"):
-                self.assertTrue((out_dir / fname).is_file(), f"Thiếu {fname}")
-                self.assertTrue((drive_out / fname).is_file(), f"Thiếu bản đồng bộ Drive {fname}")
-            self.assertTrue(any((out_dir / "figures").glob("LIDC-IDRI-0002_*.png")))
+                self.assertTrue((sub_0002 / fname).is_file(), f"Thiếu {fname}")
+            self.assertTrue(any((sub_0002 / "figures").glob("LIDC-IDRI-0002_*.png")))
+
+            # Kiểm tra naming helper cho 1 ca, 2 ca và >3 ca
+            crit = FilterCriteria(threshold=0.5, min_diameter_mm=5.0)
+            self.assertEqual(build_predict_out_subdir(["LIDC-IDRI-0051"], crit, "20261116_120000"), "LIDC-IDRI-0051_th0.5_d5_20261116_120000")
+            self.assertEqual(build_predict_out_subdir(["LIDC-IDRI-0005", "LIDC-IDRI-0051"], crit, "20261116_120000"), "LIDC-IDRI-0005_0051_th0.5_d5_20261116_120000")
+            self.assertEqual(build_predict_out_subdir(["LIDC-IDRI-0005", "LIDC-IDRI-0051", "LIDC-IDRI-0060", "LIDC-IDRI-0089"], crit, "20261116_120000"), "4ca_LIDC-IDRI-0005_to_0089_th0.5_d5_20261116_120000")
 
             # Kiểm tra resolve_model_metadata cho Mamba-UNet thực tế (448x448, EMA)
             mamba_dir = tmp / "mamba_meta_test"
@@ -331,6 +364,9 @@ class TestPredictRealSamples(unittest.TestCase):
             "MIN_AREA_MM2 =",
             "NUM_SAMPLES =",
             "SAMPLE_SOURCE =",
+            "PATIENT_IDS =",
+            "--auto-subdir",
+            "latest_predict_dir.txt",
             "display(Image(",
         ):
             self.assertIn(token, src, f"Notebook thiếu thành phần: {token}")
