@@ -47,8 +47,8 @@ flowchart TD
 
 > [!IMPORTANT]
 > ### 📌 CỘT MỐC QUAN TRỌNG: DỮ LIỆU ĐẾN GIAI ĐOẠN NÀO THÌ RA ĐƯỢC THƯ MỤC `cache_1mm`?
-> * **Script chính thức sinh ra thư mục `cache_1mm`**: **`common/data_pipeline/medical_prep.py`** (với lệnh `build`).
-> * **Đầu vào cần có trước đó**: Thư mục ảnh khối 3D NRRD (`duneai_raw_nrrd/`) do **`dicom_to_nrrd.py`** hoặc **`convert_to_duneai.py`** tạo ra ở **Giai đoạn 1**.
+> * **Script chính thức sinh ra thư mục `duneai_raw_nrrd`**: **`data/data_pipeline/dicom_to_nrrd.py`** quét dữ liệu DICOM từ `data/raw/` và tạo `mask.nrrd` bằng phép **HỢP (bitwise OR)** của tất cả các file DICOM-SEG (chỉ cần $\ge 1$ bác sĩ vẽ là tính).
+> * **Script chính thức sinh ra thư mục `cache_1mm`**: **`common/data_pipeline/medical_prep.py`** (với lệnh `build`) đọc từ `data/duneai_raw_nrrd/`.
 > * **Sản phẩm tại Giai đoạn 2**: Mỗi bệnh nhân có một thư mục `cache_1mm/<patient_id>/` chứa 4 file: `image_1mm.npy`, `mask_1mm.npy`, `lung_1mm.npy` và `meta.json`.
 > * **File `slices.csv` nằm trong `cache_1mm`**: Được sinh ra ngay sau đó ở **Giai đoạn 3** bởi script **`offline_builder.py`** (hoặc gọi qua `scripts/prepare_dataset.py build-index`).
 > * **Ý nghĩa kiến trúc**: `cache_1mm` là **ranh giới offline/online**. Toàn bộ các bước nặng CPU ở Giai đoạn 1 & 2 chỉ cần chạy **MỘT LẦN DUY NHẤT** rồi nén thành `cache_1mm.zip`. Quá trình huấn luyện sau đó chỉ đọc từ `cache_1mm`, hoàn toàn độc lập với dữ liệu gốc DICOM/NRRD.
@@ -60,8 +60,8 @@ flowchart TD
 | Thứ tự | Script | Thư mục | Đầu vào (Input) | Đầu ra (Output) | Vai trò & Trạng thái dữ liệu |
 | :---: | :--- | :--- | :--- | :--- | :--- |
 | **1.1** | [preprocess_lidc.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/preprocess_lidc.py) | `data/data_pipeline/` | DICOM CT + DICOM-SEG | `<pid>_img.npy`, `<pid>_votes.npy` | Đọc DICOM gốc, đếm số phiếu bác sĩ đồng thuận (0-4) |
-| **1.2** | [dicom_to_nrrd.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/dicom_to_nrrd.py) | `data/data_pipeline/` | DICOM CT + SEG gốc | `duneai_raw_nrrd/<pid>/(image, mask).nrrd` | **Mốc 1:** Ra ảnh khối 3D NRRD chuẩn không gian máy quét |
-| **1.3** | [convert_to_duneai.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/convert_to_duneai.py) | `data/data_pipeline/` | `<pid>_img.npy`, `<pid>_votes.npy` | `duneai_gzip_nrrd/<pid>/(image, mask).nrrd` | Chuyển npy sang NRRD với ngưỡng đồng thuận $\ge 2$ bác sĩ |
+| **1.2** | [dicom_to_nrrd.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/dicom_to_nrrd.py) | `data/data_pipeline/` | DICOM CT + SEG gốc trong `data/raw/` | `duneai_raw_nrrd/<pid>/(image, mask).nrrd` | **⭐ Mốc 1 (Chính thức):** Tạo ra `duneai_raw_nrrd` bằng phép **HỢP (Union / bitwise OR)** toàn bộ file SEG (ít nhất 1 bác sĩ vẽ) |
+| **1.3** | [convert_to_duneai.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/convert_to_duneai.py) | `data/data_pipeline/` | `<pid>_img.npy`, `<pid>_votes.npy` | `duneai_gzip_nrrd/<pid>/(image, mask).nrrd` | *(Script phụ / thử nghiệm cũ)* Thử nghiệm chuyển npy sang NRRD với ngưỡng `votes >= 2`, không dùng để tạo `duneai_raw_nrrd` |
 | **2.1** | [medical_prep.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/medical_prep.py) | `common/data_pipeline/` | Thư mục `duneai_raw_nrrd/` | `cache_1mm/<pid>/(image, mask, lung)_1mm.npy` | **⭐ Mốc 2: CHÍNH THỨC TẠO RA THƯ MỤC `cache_1mm/`** (resample 1mm, tách phổi, kẹp -1000 HU) |
 | **3.1** | [offline_builder.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/common/data_pipeline/offline_builder.py) | `common/data_pipeline/` | Thư mục `cache_1mm/` | `cache_1mm/slices.csv` | **⭐ Mốc 3: Hoàn thiện `cache_1mm`** bằng bảng chỉ mục Train/Val và cân bằng âm/dương |
 | **3.2** | [prepare_dataset.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/scripts/prepare_dataset.py) | `scripts/` | `cache_1mm/` | `cache_1mm/slices.csv` | CLI tập trung kích hoạt `offline_builder` và `runtime_data` |
@@ -95,19 +95,19 @@ Mục đích: Chuyển đổi dữ liệu quét cắt lớp CT và các file ph�
   python data/data_pipeline/preprocess_lidc.py --n 10 --jobs 2
   ```
 
-#### 1.2. `dicom_to_nrrd.py`
+#### 1.2. `dicom_to_nrrd.py` (Script chính thức tạo ra `duneai_raw_nrrd`)
 * **Vị trí**: [data/data_pipeline/dicom_to_nrrd.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/dicom_to_nrrd.py)
 * **Chức năng**:
-  * Tự động quét tìm Series CT chính xác nhất (chuỗi có số lát cắt nhiều nhất) và các file SEG đính kèm.
-  * Sử dụng thư viện `SimpleITK` để lưu thành tệp ảnh khối y tế chuẩn định dạng `.nrrd` vào thư mục `duneai_raw_nrrd/<pid>/image.nrrd` và `mask.nrrd`.
+  * Tự động quét tìm Series CT chính xác nhất (chuỗi có số lát cắt nhiều nhất) và các file SEG đính kèm từ thư mục `data/raw/<patient_id>/`.
+  * **Cơ chế tạo Mask**: Sử dụng hàm `build_union_mask` thực hiện phép **HỢP (bitwise OR `|=`)** tất cả các file DICOM-SEG (bất kỳ voxel nào có ít nhất 1 bác sĩ gắn nhãn nốt u thì đều được lấy).
+  * Sử dụng thư viện `SimpleITK` để lưu thành tệp ảnh khối y tế chuẩn định dạng `.nrrd` vào thư mục `data/duneai_raw_nrrd/<pid>/image.nrrd` và `mask.nrrd`.
 
-#### 1.3. `convert_to_duneai.py`
+#### 1.3. `convert_to_duneai.py` (Script phụ / Thử nghiệm cũ)
 * **Vị trí**: [data/data_pipeline/convert_to_duneai.py](file:///d:/GG_1/COMPUTER%20SCIENCE/NAM4_HK1_(2026-2027)/CT208E/SOURCES/data/data_pipeline/convert_to_duneai.py)
-* **Chức năng**:
-  * Tạo cầu nối chuyển đổi từ mảng `.npy` sang file `.nrrd` chuẩn hình học của DuneAI:
-    * Gán Spacing chuẩn `(dx=0.8, dy=0.8, dz=1.5)`.
-    * Nhị phân hóa mặt nạ nốt u theo ngưỡng đồng thuận $\ge 2$ bác sĩ (`mask = (votes >= 2)`).
-    * Hỗ trợ cơ chế tiếp tục (resume) nếu tệp đích đã tồn tại.
+* **Lưu ý quan trọng**: Script này **KHÔNG PHẢI** là script tạo ra `data/duneai_raw_nrrd`.
+  * Đầu vào dự kiến của nó là `data/processed/volumes/<pid>_votes.npy` (thư mục này hiện không tồn tại).
+  * Đầu ra dự kiến của nó là `data/duneai_gzip_nrrd/` với ngưỡng `votes >= 2` và spacing cố định `(0.8, 0.8, 1.5)`.
+  * Trong pipeline thực tế đang chạy, dữ liệu `duneai_raw_nrrd` được tạo trực tiếp từ DICOM thô bằng `dicom_to_nrrd.py` (phép HỢP toàn bộ SEG).
 
 ---
 
@@ -145,6 +145,20 @@ Mục đích: Chuyển đổi dữ liệu quét cắt lớp CT và các file ph�
 
 > [!NOTE]
 > Giai đoạn này bổ sung tệp **`cache_1mm/slices.csv`** vào thư mục `cache_1mm`, hoàn thiện 100% gói dữ liệu để sẵn sàng đem đi huấn luyện hoặc nén thành `cache_1mm.zip`.
+
+> [!IMPORTANT]
+> #### ⚖️ ĐỐI CHIẾU THAM SỐ: R0 BASELINE BAN ĐẦU vs. TRẠNG THÁI ĐÍCH (TARGET / R1c & R2)
+> Tài liệu này mô tả **Trạng thái đích (Target Specification)** đã được tối ưu qua chuỗi thực nghiệm R1c / R2, **không phải** thông số thô của bản R0 Baseline:
+> 
+> | Thông số | Mặc định R0 Baseline (`configs/config.py`) | Trạng thái đích tối ưu (Tài liệu này / R1c, R2) | Lý do cải tiến |
+> | :--- | :---: | :---: | :--- |
+> | **Ngưỡng diện tích u (`min_train_area`)** | `20.0 mm²` | **`5.0 mm²`** | R0 bỏ sót toàn bộ các nốt u nhỏ từ 5–20 mm² (mất độ nhạy lâm sàng) |
+> | **Tỷ lệ lát âm tính (`neg_ratio`)** | `0.25` | **`0.35`** | Bổ sung thêm bối cảnh lát âm tính có phổi để giảm dương tính giả (FP) |
+> | **Sàn lát âm mỗi ca (`min_neg_per_case`)** | `1` (ca rỗng chỉ lấy 1 lát) | **`4`** | Đảm bảo các ca không có u (như 0218, 0322) có đủ lát học, không bị dự đoán nhầm |
+> | **Kích thước ảnh (`IMAGE_SIZE`)** | `512 × 512` | **`448 × 448`** | Tiết kiệm 23% bộ nhớ & tính toán, không làm mất FOV nốt u theo kiểm tra `check_cache.py` |
+> | **Mức tăng cường (`aug_level`)** | `0` (không tăng cường / chỉ lật) | **`2` (Lật + Xoay ±10° + Affine + Blur/Noise)** | Chống overfit mạnh ở các epoch cuối (giảm chênh lệch Train-Val Dice) |
+> | **Phân chia Train/Val (`val_split`)** | `0.15` (15% theo bệnh nhân) | `0.15` (15% theo bệnh nhân) | Giữ cố định 425 Train / 75 Val (64 ca có u + 11 ca âm tính hoàn toàn) |
+> | **Trọng số hàm mất mát (`loss_params`)** | BCE 0.3 + Dice 0.7 (`pos_weight = 4.0`) | **BCE 1.0 (hoặc 3.0) + Dice 1.0 (`pos_weight = 2.0` hoặc `1.5`)** | Giảm phạt lệch dương tính quá mức, hạ 58.8% BCE loss và triệt tiêu FP |
 
 Mục đích: Xây dựng bảng chỉ mục tĩnh (`slices.csv`), loại bỏ lát cắt vô nghĩa và đảm bảo tỷ lệ cân bằng âm/dương mà không gây rò rỉ dữ liệu giữa tập huấn luyện và kiểm định.
 

@@ -158,6 +158,7 @@ def main():
         ("24. Test notebooks", [py, "tests/test_notebooks.py"]),
         ("25. Check notebooks nbformat", [py, "scripts/make_notebooks.py", "--check"]),
         ("26. Test Run 2 regularization", [py, "tests/test_run2_regularization.py"]),
+        ("27. Test predict real samples", [py, "tests/test_predict_samples.py"]),
     ]
 
     results = []

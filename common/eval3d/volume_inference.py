@@ -54,6 +54,8 @@ def predict_patient_volume(
     tta: bool = False,
     use_amp: bool = True,
     compute_post_and_metrics: bool = True,
+    show_progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Suy luận 3D hoàn chỉnh cho 1 bệnh nhân từ thư mục cache_1mm/<patient_id>:
@@ -95,7 +97,16 @@ def predict_patient_volume(
         else nullcontext()
     )
 
-    for start in range(0, len(active_z), batch_size):
+    batch_starts = range(0, len(active_z), batch_size)
+    if show_progress:
+        try:
+            from tqdm import tqdm
+            desc = progress_desc or f"  Suy luận {patient_cache_dir.name}"
+            batch_starts = tqdm(batch_starts, desc=desc, leave=False, dynamic_ncols=True, mininterval=0.25)
+        except ImportError:
+            pass
+
+    for start in batch_starts:
         batch_z = active_z[start : start + batch_size]
         stacks = []
         for z in batch_z:
