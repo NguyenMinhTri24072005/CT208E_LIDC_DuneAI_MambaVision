@@ -1,0 +1,7 @@
+patient_id,split_status,comp_type,comp_id,kept,filter_reason,verdict,z_start,z_end,z_span,centroid_zyx,max_area_mm2,max_diam_mm,size_bin,vol_mm3,voxels,max_prob,mean_prob,overlap_gt_voxels,matched_gt_ids,overlap_dice_pct
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,1,True,ĐẠT NGƯỠNG,FP (Dương tính giả),67,74,8,"(70.2, 198.9, 60.0)",52.0,8.14,5 - 10 mm (Nhỏ),190.0,190,1.0,0.9516,0,-,0.0
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,2,True,ĐẠT NGƯỠNG,FP (Dương tính giả),77,83,7,"(80.8, 192.6, 59.9)",69.0,9.37,5 - 10 mm (Nhỏ),217.0,217,1.0,0.9478,0,-,0.0
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,3,False,Diam=3.4 < 5.0 mm; Vol=9.0 < 10.0 mm³,REJECTED (Đã lọc bỏ),83,83,1,"(83.0, 111.7, 55.9)",9.0,3.39,< 5 mm (Rất nhỏ),9.0,9,0.999,0.9306,0,-,0.0
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,4,False,Diam=4.2 < 5.0 mm,REJECTED (Đã lọc bỏ),171,172,2,"(171.2, 115.6, 111.4)",14.0,4.22,< 5 mm (Rất nhỏ),17.0,17,1.0,0.9077,0,-,0.0
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,5,True,ĐẠT NGƯỠNG,FP (Dương tính giả),269,271,3,"(269.7, 153.6, 110.4)",93.0,10.88,10 - 20 mm (Vừa),158.0,158,1.0,0.9266,0,-,0.0
+LIDC-IDRI-0540,UNSEEN (Mới 100%),PRED,6,True,ĐẠT NGƯỠNG,FP (Dương tính giả),274,274,1,"(274.0, 155.1, 105.5)",34.0,6.58,5 - 10 mm (Nhỏ),34.0,34,0.999,0.952,0,-,0.0

@@ -1,0 +1,84 @@
+{
+  "overall": {
+    "timestamp": "2026-11-16 14:05:11",
+    "model": {
+      "arch": "mamba_unet",
+      "backbone": "mamba_vision_T",
+      "activation": "relu",
+      "image_size": 448,
+      "epoch": 28,
+      "best_val_dice": 0.7241689453907983,
+      "is_ema": true,
+      "run_id": "mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2"
+    },
+    "criteria": {
+      "threshold": 0.5,
+      "min_comp_max_prob": 0.0,
+      "min_diameter_mm": 5.0,
+      "min_area_mm2": 5.0,
+      "min_volume_mm3": 10.0,
+      "min_slices_span": 1,
+      "filter_scope": "3d_component",
+      "fill_holes": true
+    },
+    "total_patients": 1,
+    "pos_patients": 1,
+    "neg_patients": 0,
+    "clean_neg_patients": 0,
+    "mean_3d_dice_all_pct": 53.2,
+    "mean_3d_dice_pos_pct": 53.2,
+    "mean_3d_iou_all_pct": 36.24,
+    "mean_pooled_pred_slices_dice_pct": 63.16,
+    "mean_hd95_mm": 244.988,
+    "mean_assd_mm": 55.37,
+    "total_gt_nodules": 2,
+    "total_gt_detected": 1,
+    "total_pred_kept": 2,
+    "total_pred_fp": 1,
+    "total_pred_filtered_out": 1,
+    "total_compare_slices": 7
+  },
+  "patients": [
+    {
+      "patient_id": "LIDC-IDRI-0541",
+      "split_status": "UNSEEN (Mới 100%)",
+      "case_outcome": "PARTIAL_HIT",
+      "num_slices": 111,
+      "spacing_z_mm": 3.0,
+      "n_gt_nodules": 2,
+      "n_gt_detected": 1,
+      "nodule_sens_pct": 50.0,
+      "n_pred_kept": 2,
+      "n_pred_tp": 1,
+      "n_pred_fp": 1,
+      "n_pred_filtered_out": 1,
+      "n_gt_slices": 6,
+      "n_pred_slices": 4,
+      "n_pred_hit_slices": 3,
+      "slice_prec_pct": 75.0,
+      "slice_rec_pct": 50.0,
+      "pooled_dice_on_pred_slices_pct": 63.16,
+      "mean_dice_on_pred_slices_pct": 54.56,
+      "mean_dice_on_compare_slices_pct": 31.18,
+      "dice_3d_raw_pct": 49.32,
+      "dice_3d_post_pct": 53.2,
+      "iou_3d_post_pct": 36.24,
+      "precision_3d_pct": 51.92,
+      "recall_3d_pct": 54.55,
+      "vol_similarity_pct": 97.54,
+      "gt_vol_mm3": 297.0,
+      "pred_vol_mm3": 312.0,
+      "vol_ratio": 1.051,
+      "hd95_mm": 244.988,
+      "assd_mm": 55.37,
+      "time_sec": 5.09
+    }
+  ],
+  "figures": {
+    "LIDC-IDRI-0541": [
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0541_th0.5_d5_20261116_140451/figures/LIDC-IDRI-0541_slices_p01.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0541_th0.5_d5_20261116_140451/figures/LIDC-IDRI-0541_slices_p02.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0541_th0.5_d5_20261116_140451/figures/LIDC-IDRI-0541_3d_overview.png"
+    ]
+  }
+}

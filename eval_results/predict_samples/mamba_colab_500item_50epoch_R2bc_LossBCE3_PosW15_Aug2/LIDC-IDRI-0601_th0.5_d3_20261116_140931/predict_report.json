@@ -1,0 +1,92 @@
+{
+  "overall": {
+    "timestamp": "2026-11-16 14:10:42",
+    "model": {
+      "arch": "mamba_unet",
+      "backbone": "mamba_vision_T",
+      "activation": "relu",
+      "image_size": 448,
+      "epoch": 28,
+      "best_val_dice": 0.7241689453907983,
+      "is_ema": true,
+      "run_id": "mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2"
+    },
+    "criteria": {
+      "threshold": 0.5,
+      "min_comp_max_prob": 0.0,
+      "min_diameter_mm": 3.0,
+      "min_area_mm2": 3.0,
+      "min_volume_mm3": 5.0,
+      "min_slices_span": 1,
+      "filter_scope": "both",
+      "fill_holes": true
+    },
+    "total_patients": 1,
+    "pos_patients": 1,
+    "neg_patients": 0,
+    "clean_neg_patients": 0,
+    "mean_3d_dice_all_pct": 47.55,
+    "mean_3d_dice_pos_pct": 47.55,
+    "mean_3d_iou_all_pct": 31.19,
+    "mean_pooled_pred_slices_dice_pct": 51.18,
+    "mean_hd95_mm": 61.569,
+    "mean_assd_mm": 16.297,
+    "total_gt_nodules": 5,
+    "total_gt_detected": 4,
+    "total_pred_kept": 20,
+    "total_pred_fp": 16,
+    "total_pred_filtered_out": 0,
+    "total_compare_slices": 56
+  },
+  "patients": [
+    {
+      "patient_id": "LIDC-IDRI-0601",
+      "split_status": "UNSEEN (Mới 100%)",
+      "case_outcome": "PARTIAL_HIT",
+      "num_slices": 286,
+      "spacing_z_mm": 1.0,
+      "n_gt_nodules": 5,
+      "n_gt_detected": 4,
+      "nodule_sens_pct": 80.0,
+      "n_pred_kept": 20,
+      "n_pred_tp": 4,
+      "n_pred_fp": 16,
+      "n_pred_filtered_out": 0,
+      "n_gt_slices": 41,
+      "n_pred_slices": 45,
+      "n_pred_hit_slices": 23,
+      "slice_prec_pct": 51.11,
+      "slice_rec_pct": 56.1,
+      "pooled_dice_on_pred_slices_pct": 51.18,
+      "mean_dice_on_pred_slices_pct": 33.05,
+      "mean_dice_on_compare_slices_pct": 26.56,
+      "dice_3d_raw_pct": 47.38,
+      "dice_3d_post_pct": 47.55,
+      "iou_3d_post_pct": 31.19,
+      "precision_3d_pct": 60.43,
+      "recall_3d_pct": 39.19,
+      "vol_similarity_pct": 78.69,
+      "gt_vol_mm3": 3031.0,
+      "pred_vol_mm3": 1966.0,
+      "vol_ratio": 0.649,
+      "hd95_mm": 61.569,
+      "assd_mm": 16.297,
+      "time_sec": 9.04
+    }
+  ],
+  "figures": {
+    "LIDC-IDRI-0601": [
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p01.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p02.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p03.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p04.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p05.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p06.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p07.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p08.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p09.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_slices_p10.png",
+      "/content/predict_outputs/mamba_colab_500item_50epoch_R2bc_LossBCE3_PosW15_Aug2/LIDC-IDRI-0601_th0.5_d3_20261116_140931/figures/LIDC-IDRI-0601_3d_overview.png"
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+patient_id,split_status,comp_type,comp_id,kept,filter_reason,verdict,z_start,z_end,z_span,centroid_zyx,max_area_mm2,max_diam_mm,size_bin,vol_mm3,voxels,max_prob,mean_prob,overlap_gt_voxels,matched_gt_ids,overlap_dice_pct,nodule_recall_pct,nodule_iou_pct
+LIDC-IDRI-0601,UNSEEN (Mới 100%),GT,1,True,-,DETECTED (Bắt được),61,71,11,"(66.3, 212.1, 45.5)",85.0,10.4,10 - 20 mm (Vừa),550.0,550,1.0,0.6202,336,1,72.96,61.09,57.44
+LIDC-IDRI-0601,UNSEEN (Mới 100%),GT,2,True,-,DETECTED (Bắt được),63,69,7,"(65.9, 242.5, 197.8)",44.0,7.48,5 - 10 mm (Nhỏ),229.0,229,1.0,0.4996,114,2,62.81,49.78,45.78
+LIDC-IDRI-0601,UNSEEN (Mới 100%),GT,3,True,-,MISSED (Bỏ sót),70,79,10,"(74.8, 183.2, 212.1)",52.0,8.14,5 - 10 mm (Nhỏ),376.0,376,0.0,0.0,0,3,0.0,0.0,0.0
+LIDC-IDRI-0601,UNSEEN (Mới 100%),GT,4,True,-,DETECTED (Bắt được),89,105,17,"(97.8, 271.4, 129.7)",150.0,13.82,10 - 20 mm (Vừa),1750.0,1750,1.0,0.4094,717,4,57.92,40.97,40.76
+LIDC-IDRI-0601,UNSEEN (Mới 100%),GT,5,True,-,DETECTED (Bắt được),106,110,5,"(108.1, 256.0, 68.7)",40.0,7.14,5 - 10 mm (Nhỏ),126.0,126,1.0,0.1649,21,5,28.57,16.67,16.67
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,1,True,ĐẠT NGƯỠNG,FP (Dương tính giả),41,41,1,"(41.0, 261.0, 113.5)",26.0,5.75,5 - 10 mm (Nhỏ),26.0,26,1.0,0.9402,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,2,True,ĐẠT NGƯỠNG,FP (Dương tính giả),48,48,1,"(48.0, 200.9, 184.4)",17.0,4.65,< 5 mm (Rất nhỏ),17.0,17,1.0,0.9575,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,3,True,ĐẠT NGƯỠNG,TP (Trúng u thật),63,67,5,"(64.7, 241.5, 198.2)",38.0,6.96,5 - 10 mm (Nhỏ),134.0,134,1.0,0.9683,114,2,62.81,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,4,True,ĐẠT NGƯỠNG,TP (Trúng u thật),65,71,7,"(67.8, 212.7, 46.4)",81.0,10.16,10 - 20 mm (Vừa),371.0,371,1.0,0.9833,336,1,72.96,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,5,True,ĐẠT NGƯỠNG,FP (Dương tính giả),74,77,4,"(75.4, 197.0, 48.5)",32.0,6.38,5 - 10 mm (Nhỏ),91.0,91,1.0,0.9414,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,6,True,ĐẠT NGƯỠNG,FP (Dương tính giả),84,87,4,"(85.8, 153.2, 62.1)",184.0,15.31,10 - 20 mm (Vừa),398.0,398,1.0,0.9665,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,7,True,ĐẠT NGƯỠNG,FP (Dương tính giả),88,88,1,"(88.0, 244.9, 217.1)",8.0,3.19,< 5 mm (Rất nhỏ),8.0,8,0.9985,0.8507,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,8,True,ĐẠT NGƯỠNG,FP (Dương tính giả),89,89,1,"(89.0, 194.8, 48.0)",16.0,4.51,< 5 mm (Rất nhỏ),16.0,16,0.999,0.9008,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,9,True,ĐẠT NGƯỠNG,FP (Dương tính giả),92,92,1,"(92.0, 215.5, 70.0)",10.0,3.57,< 5 mm (Rất nhỏ),10.0,10,0.9941,0.8088,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,10,True,ĐẠT NGƯỠNG,FP (Dương tính giả),93,93,1,"(93.0, 143.1, 250.3)",9.0,3.39,< 5 mm (Rất nhỏ),9.0,9,0.999,0.9486,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,11,True,ĐẠT NGƯỠNG,TP (Trúng u thật),94,105,12,"(99.1, 269.8, 129.2)",90.0,10.7,10 - 20 mm (Vừa),726.0,726,1.0,0.9721,717,4,57.92,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,12,True,ĐẠT NGƯỠNG,TP (Trúng u thật),107,108,2,"(107.5, 254.2, 69.2)",11.0,3.74,< 5 mm (Rất nhỏ),21.0,21,1.0,0.9409,21,5,28.57,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,13,True,ĐẠT NGƯỠNG,FP (Dương tính giả),108,108,1,"(108.0, 193.5, 105.0)",8.0,3.19,< 5 mm (Rất nhỏ),8.0,8,0.9995,0.9058,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,14,True,ĐẠT NGƯỠNG,FP (Dương tính giả),111,111,1,"(111.0, 129.9, 226.1)",8.0,3.19,< 5 mm (Rất nhỏ),8.0,8,0.999,0.9644,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,15,True,ĐẠT NGƯỠNG,FP (Dương tính giả),124,125,2,"(124.2, 255.0, 137.8)",39.0,7.05,5 - 10 mm (Nhỏ),48.0,48,1.0,0.9451,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,16,True,ĐẠT NGƯỠNG,FP (Dương tính giả),127,127,1,"(127.0, 260.3, 136.6)",20.0,5.05,5 - 10 mm (Nhỏ),20.0,20,1.0,0.9777,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,17,True,ĐẠT NGƯỠNG,FP (Dương tính giả),130,130,1,"(130.0, 160.2, 253.6)",14.0,4.22,< 5 mm (Rất nhỏ),14.0,14,0.9995,0.898,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,18,True,ĐẠT NGƯỠNG,FP (Dương tính giả),159,159,1,"(159.0, 146.9, 210.3)",9.0,3.39,< 5 mm (Rất nhỏ),9.0,9,0.938,0.7569,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,19,True,ĐẠT NGƯỠNG,FP (Dương tính giả),175,175,1,"(175.0, 225.5, 77.3)",14.0,4.22,< 5 mm (Rất nhỏ),14.0,14,1.0,0.9515,0,-,0.0,,
+LIDC-IDRI-0601,UNSEEN (Mới 100%),PRED,20,True,ĐẠT NGƯỠNG,FP (Dương tính giả),189,189,1,"(189.0, 138.3, 181.7)",18.0,4.79,< 5 mm (Rất nhỏ),18.0,18,1.0,0.9544,0,-,0.0,,
